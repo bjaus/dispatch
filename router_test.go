@@ -31,6 +31,10 @@ type testSource struct {
 
 func (s *testSource) Name() string { return s.name }
 
+func (s *testSource) Discriminator() Discriminator {
+	return HasFields("type", "payload")
+}
+
 func (s *testSource) Parse(raw []byte) (Parsed, bool) {
 	var env struct {
 		Type    string          `json:"type"`
@@ -110,7 +114,7 @@ func TestRouter_Process(t *testing.T) {
 		r := New()
 
 		// First source doesn't match JSON format
-		r.AddSource(SourceFunc("first", func(raw []byte) (Parsed, bool) {
+		r.AddSource(SourceFunc("first", HasFields("nonexistent"), func(raw []byte) (Parsed, bool) {
 			return Parsed{}, false
 		}))
 
@@ -272,7 +276,7 @@ func TestRouter_Completion(t *testing.T) {
 		var completeCalled bool
 		var completeErr error
 
-		source := SourceFunc("completion", func(raw []byte) (Parsed, bool) {
+		source := SourceFunc("completion", HasFields("type", "payload"), func(raw []byte) (Parsed, bool) {
 			var env struct {
 				Type    string          `json:"type"`
 				Payload json.RawMessage `json:"payload"`
@@ -309,7 +313,7 @@ func TestRouter_Completion(t *testing.T) {
 	t.Run("Complete is called on failure", func(t *testing.T) {
 		var completeErr error
 
-		source := SourceFunc("completion", func(raw []byte) (Parsed, bool) {
+		source := SourceFunc("completion", HasFields("type", "payload"), func(raw []byte) (Parsed, bool) {
 			var env struct {
 				Type    string          `json:"type"`
 				Payload json.RawMessage `json:"payload"`

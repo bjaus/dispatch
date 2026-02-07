@@ -40,8 +40,9 @@ func (f HandlerFunc[T]) Handle(ctx context.Context, payload T) error {
 
 // Source parses raw message bytes and extracts routing information.
 //
-// Sources are registered with Router.AddSource and tried in registration order.
-// The first source whose Parse method returns true handles the message.
+// Sources are registered with Router.AddSource and matched using their
+// Discriminator before Parse is called. This allows cheap detection before
+// expensive parsing.
 //
 // Implement Source to support different message formats:
 //   - EventBridge events
@@ -55,6 +56,10 @@ func (f HandlerFunc[T]) Handle(ctx context.Context, payload T) error {
 //	type mySource struct{}
 //
 //	func (s *mySource) Name() string { return "my-source" }
+//
+//	func (s *mySource) Discriminator() dispatch.Discriminator {
+//	    return dispatch.HasFields("type", "payload")
+//	}
 //
 //	func (s *mySource) Parse(raw []byte) (dispatch.Parsed, bool) {
 //	    var env struct {
@@ -70,28 +75,39 @@ type Source interface {
 	// Name returns the source identifier for logging and metrics.
 	Name() string
 
+	// Discriminator returns a predicate for cheap message detection.
+	// The router calls this before Parse to avoid expensive parsing
+	// when the message format doesn't match.
+	Discriminator() Discriminator
+
 	// Parse attempts to parse raw bytes as this source's format.
 	// Returns the parsed result and true if successful, or false if this
 	// source does not recognize the message format.
 	Parse(raw []byte) (Parsed, bool)
 }
 
-// SourceFunc creates a Source from a name and parse function.
+// SourceFunc creates a Source from a name, discriminator, and parse function.
 // Use this for simple sources that don't need a struct:
 //
-//	r.AddSource(dispatch.SourceFunc("legacy", func(raw []byte) (dispatch.Parsed, bool) {
-//	    // parse logic
-//	}))
-func SourceFunc(name string, parse func([]byte) (Parsed, bool)) Source {
-	return &sourceFunc{name: name, parse: parse}
+//	r.AddSource(dispatch.SourceFunc(
+//	    "legacy",
+//	    dispatch.HasFields("type", "payload"),
+//	    func(raw []byte) (dispatch.Parsed, bool) {
+//	        // parse logic
+//	    },
+//	))
+func SourceFunc(name string, disc Discriminator, parse func([]byte) (Parsed, bool)) Source {
+	return &sourceFunc{name: name, disc: disc, parse: parse}
 }
 
 type sourceFunc struct {
 	name  string
+	disc  Discriminator
 	parse func([]byte) (Parsed, bool)
 }
 
 func (s *sourceFunc) Name() string                    { return s.name }
+func (s *sourceFunc) Discriminator() Discriminator    { return s.disc }
 func (s *sourceFunc) Parse(raw []byte) (Parsed, bool) { return s.parse(raw) }
 
 // Parsed contains the result of source parsing.

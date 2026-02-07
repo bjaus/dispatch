@@ -29,6 +29,10 @@ type simpleSource struct{}
 
 func (s *simpleSource) Name() string { return "simple" }
 
+func (s *simpleSource) Discriminator() dispatch.Discriminator {
+	return dispatch.HasFields("type", "payload")
+}
+
 func (s *simpleSource) Parse(raw []byte) (dispatch.Parsed, bool) {
 	var env struct {
 		Type    string          `json:"type"`
@@ -91,7 +95,7 @@ func Example_sourceFunc() {
 	r := dispatch.New()
 
 	// Use SourceFunc for simple sources
-	r.AddSource(dispatch.SourceFunc("custom", func(raw []byte) (dispatch.Parsed, bool) {
+	r.AddSource(dispatch.SourceFunc("custom", dispatch.HasFields("event", "data"), func(raw []byte) (dispatch.Parsed, bool) {
 		var env struct {
 			Event string          `json:"event"`
 			Data  json.RawMessage `json:"data"`
@@ -166,6 +170,10 @@ func Example_skipBadMessages() {
 type completionSource struct{}
 
 func (s *completionSource) Name() string { return "completion" }
+
+func (s *completionSource) Discriminator() dispatch.Discriminator {
+	return dispatch.HasFields("task", "token", "payload")
+}
 
 func (s *completionSource) Parse(raw []byte) (dispatch.Parsed, bool) {
 	var env struct {

@@ -27,6 +27,10 @@ type sourceWithHooks struct {
 
 func (s *sourceWithHooks) Name() string { return s.name }
 
+func (s *sourceWithHooks) Discriminator() Discriminator {
+	return HasFields("type", "payload")
+}
+
 func (s *sourceWithHooks) Parse(raw []byte) (Parsed, bool) {
 	var env struct {
 		Type    string          `json:"type"`
