@@ -46,18 +46,63 @@
 //   - Consistent observability via hooks
 //   - Easy testing with mock sources
 //
+// # Discriminator Pattern
+//
+// Sources implement a two-phase matching strategy for efficient routing:
+//
+//  1. Discriminator: Cheap field presence/value checks
+//  2. Parse: Full envelope parsing only after discriminator matches
+//
+// This avoids expensive JSON parsing when messages don't match a source,
+// and enables O(1) hot-path matching via adaptive ordering (the last successful
+// source is tried first on subsequent messages).
+//
+//	func (s *mySource) Discriminator() dispatch.Discriminator {
+//	    return dispatch.And(
+//	        dispatch.HasFields("source", "detail-type"),
+//	        dispatch.FieldEquals("source", "my.service"),
+//	    )
+//	}
+//
+// Composable discriminators are provided:
+//   - HasFields: Check for field presence
+//   - FieldEquals: Check field value
+//   - And: All discriminators must match
+//   - Or: Any discriminator must match
+//
+// # Inspector and View
+//
+// The Inspector/View abstraction enables format-agnostic field access:
+//
+//	type Inspector interface {
+//	    Inspect(raw []byte) (View, error)
+//	}
+//
+//	type View interface {
+//	    HasField(path string) bool
+//	    GetString(path string) (string, bool)
+//	    GetBytes(path string) ([]byte, bool)
+//	}
+//
+// By default, the router uses JSONInspector for all sources. For mixed formats
+// (e.g., JSON and protobuf), use AddGroup with a custom inspector:
+//
+//	r := dispatch.New()
+//	r.AddSource(jsonSource)                          // Uses default JSON inspector
+//	r.AddGroup(protoInspector, grpcSource, kafkaSource) // Custom inspector
+//
 // # Sources
 //
 // A Source parses raw message bytes and returns routing information:
 //
 //	type Source interface {
 //	    Name() string
+//	    Discriminator() Discriminator
 //	    Parse(raw []byte) (Parsed, bool)
 //	}
 //
-// Sources are tried in registration order. The first source that returns true
-// from Parse handles the message. This allows a single queue to receive messages
-// from EventBridge, SNS, Step Functions, and custom formats.
+// Sources are matched using their Discriminator, then parsed in registration order.
+// The first source whose discriminator matches and Parse succeeds handles the message.
 //
 // The Parsed struct contains:
 //   - Key: routing key to match against registered handlers
@@ -69,6 +114,10 @@
 //	type mySource struct{}
 //
 //	func (s *mySource) Name() string { return "my-source" }
+//
+//	func (s *mySource) Discriminator() dispatch.Discriminator {
+//	    return dispatch.HasFields("type", "payload")
+//	}
 //
 //	func (s *mySource) Parse(raw []byte) (dispatch.Parsed, bool) {
 //	    var env struct {
@@ -83,6 +132,10 @@
 //	        Payload: env.Payload,
 //	    }, true
 //	}
+//
+// Use SourceFunc for simple sources without a struct:
+//
+//	r.AddSource(dispatch.SourceFunc("custom", dispatch.HasFields("event"), parseFunc))
 //
 // # Handlers
 //
@@ -152,27 +205,6 @@
 // For error-returning hooks, if either global or source returns an error, that
 // error is returned. This allows sources to override global skip/fail policies.
 //
-// # Composing Hooks
-//
-// Pass multiple hooks to New to compose them:
-//
-//	r := dispatch.New(
-//	    // Logging hooks
-//	    dispatch.WithOnParse(addLoggingContext),
-//	    dispatch.WithOnSuccess(logSuccess),
-//	    dispatch.WithOnFailure(logFailure),
-//
-//	    // Metrics hooks
-//	    dispatch.WithOnSuccess(recordSuccessMetric),
-//	    dispatch.WithOnFailure(recordFailureMetric),
-//
-//	    // Error handling hooks
-//	    dispatch.WithOnNoHandler(skipUnknownEvents),
-//	)
-//
-// Hooks are called in registration order. For context-returning hooks, the context
-// chains through each hook. For error-returning hooks, the first error wins.
-//
 // # Completion Callbacks
 //
 // Sources can provide a Complete callback in Parsed for transport-specific
@@ -232,5 +264,5 @@
 // # Thread Safety
 //
 // Router is safe for concurrent use after configuration is complete. Do not call
-// AddSource or Register after calling Process.
+// AddSource, AddGroup, or Register after calling Process.
 package dispatch
