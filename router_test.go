@@ -139,6 +139,126 @@ func TestRouter_Process(t *testing.T) {
 	})
 }
 
+func TestRouter_Groups(t *testing.T) {
+	t.Run("default group uses default inspector", func(t *testing.T) {
+		r := New()
+		r.AddSource(&testSource{name: "json-source"})
+
+		h := &testHandler{}
+		Register(r, "test/event", h)
+
+		msg := []byte(`{"type": "test/event", "payload": {"value": "hello"}}`)
+		err := r.Process(context.Background(), msg)
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if !h.called {
+			t.Error("handler was not called")
+		}
+	})
+
+	t.Run("custom group with custom inspector", func(t *testing.T) {
+		r := New()
+
+		// Custom inspector that looks for "event" field instead of "type"
+		customInspector := JSONInspector()
+		customSource := SourceFunc("custom", HasFields("event", "data"), func(raw []byte) (Parsed, bool) {
+			var env struct {
+				Event string          `json:"event"`
+				Data  json.RawMessage `json:"data"`
+			}
+			if err := json.Unmarshal(raw, &env); err != nil || env.Event == "" {
+				return Parsed{}, false
+			}
+			return Parsed{Key: env.Event, Payload: env.Data}, true
+		})
+
+		r.AddGroup(customInspector, customSource)
+
+		h := &testHandler{}
+		Register(r, "custom/event", h)
+
+		msg := []byte(`{"event": "custom/event", "data": {"value": "test"}}`)
+		err := r.Process(context.Background(), msg)
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if !h.called {
+			t.Error("handler was not called")
+		}
+	})
+
+	t.Run("default group checked before custom groups", func(t *testing.T) {
+		r := New()
+
+		var matchedSource string
+
+		// Default group source
+		r.AddSource(SourceFunc("default", HasFields("type"), func(raw []byte) (Parsed, bool) {
+			matchedSource = "default"
+			var env struct {
+				Type    string          `json:"type"`
+				Payload json.RawMessage `json:"payload"`
+			}
+			if err := json.Unmarshal(raw, &env); err != nil || env.Type == "" {
+				return Parsed{}, false
+			}
+			return Parsed{Key: env.Type, Payload: env.Payload}, true
+		}))
+
+		// Custom group source (also matches "type" field)
+		customSource := SourceFunc("custom", HasFields("type"), func(raw []byte) (Parsed, bool) {
+			matchedSource = "custom"
+			var env struct {
+				Type    string          `json:"type"`
+				Payload json.RawMessage `json:"payload"`
+			}
+			if err := json.Unmarshal(raw, &env); err != nil || env.Type == "" {
+				return Parsed{}, false
+			}
+			return Parsed{Key: env.Type, Payload: env.Payload}, true
+		})
+		r.AddGroup(JSONInspector(), customSource)
+
+		Register(r, "test", &testHandler{})
+
+		msg := []byte(`{"type": "test", "payload": {}}`)
+		_ = r.Process(context.Background(), msg)
+
+		if matchedSource != "default" {
+			t.Errorf("matched source = %q, want %q", matchedSource, "default")
+		}
+	})
+
+	t.Run("WithInspector overrides default inspector", func(t *testing.T) {
+		// Create a custom inspector that always fails
+		failingInspector := &mockInspector{err: ErrInvalidJSON}
+
+		r := New(WithInspector(failingInspector))
+		r.AddSource(&testSource{name: "test"})
+
+		msg := []byte(`{"type": "test", "payload": {}}`)
+		err := r.Process(context.Background(), msg)
+
+		// Should fail because default inspector fails
+		if err == nil {
+			t.Error("expected error due to failing inspector")
+		}
+	})
+}
+
+// mockInspector is a test inspector that can be configured to fail.
+type mockInspector struct {
+	err error
+}
+
+func (m *mockInspector) Inspect(raw []byte) (View, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	return JSONInspector().Inspect(raw)
+}
+
 func TestRouter_Hooks(t *testing.T) {
 	t.Run("OnParse is called with source and key", func(t *testing.T) {
 		var gotSource, gotKey string

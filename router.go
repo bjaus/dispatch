@@ -21,19 +21,30 @@ type invoker func(ctx context.Context, payload json.RawMessage) error
 //
 // Usage:
 //  1. Create a router with New
-//  2. Add sources with AddSource
+//  2. Add sources with AddSource (or AddGroup for custom inspectors)
 //  3. Register handlers with Register
 //  4. Process messages with Process
 //
-// Router is safe for concurrent use after configuration. Do not call AddSource
-// or Register after calling Process.
+// Router is safe for concurrent use after configuration. Do not call AddSource,
+// AddGroup, or Register after calling Process.
 type Router struct {
-	sources  []Source
-	handlers map[string]invoker
-	hooks    hooks
+	defaultInspector Inspector
+	defaultSources   []Source
+	groups           []group
+	handlers         map[string]invoker
+	hooks            hooks
+}
+
+// group holds sources that share an inspector.
+type group struct {
+	inspector Inspector
+	sources   []Source
 }
 
 // New creates a Router with the given options.
+//
+// By default, the router uses JSONInspector for source matching. Use
+// WithInspector to override.
 //
 // Example:
 //
@@ -47,16 +58,24 @@ type Router struct {
 //	)
 func New(opts ...Option) *Router {
 	r := &Router{
-		handlers: make(map[string]invoker),
+		defaultInspector: JSONInspector(),
+		handlers:         make(map[string]invoker),
 	}
 	for _, opt := range opts {
-		opt(&r.hooks)
+		opt(r)
 	}
 	return r
 }
 
-// AddSource registers a source. Sources are tried in registration order during
-// Process until one successfully parses the message.
+// WithInspector sets the default inspector for sources added with AddSource.
+func WithInspector(i Inspector) Option {
+	return func(r *Router) {
+		r.defaultInspector = i
+	}
+}
+
+// AddSource registers a source to the default inspector group. Sources are
+// matched using their Discriminator, then parsed in registration order.
 //
 // Example:
 //
@@ -64,7 +83,19 @@ func New(opts ...Option) *Router {
 //	r.AddSource(snsSource)
 //	r.AddSource(sfnSource)
 func (r *Router) AddSource(s Source) {
-	r.sources = append(r.sources, s)
+	r.defaultSources = append(r.defaultSources, s)
+}
+
+// AddGroup registers sources with a custom inspector. Use this when you have
+// sources that use a different message format (e.g., protobuf).
+//
+// Groups are checked after the default group, in registration order.
+//
+// Example:
+//
+//	r.AddGroup(protoInspector, grpcSource, kafkaSource)
+func (r *Router) AddGroup(inspector Inspector, sources ...Source) {
+	r.groups = append(r.groups, group{inspector: inspector, sources: sources})
 }
 
 // Register adds a handler for a routing key. The key must match the Key field
@@ -109,12 +140,13 @@ func RegisterFunc[T any](r *Router, key string, fn func(ctx context.Context, pay
 // executes completion callbacks.
 //
 // The processing flow:
-//  1. Try each source's Parse method until one returns true
-//  2. Look up the handler by the parsed routing key
-//  3. Unmarshal the payload to the handler's type
-//  4. Validate the payload if it implements Validatable
-//  5. Call the handler
-//  6. Call the source's Complete callback if provided
+//  1. Use discriminators to find a matching source
+//  2. Parse the message with the matched source
+//  3. Look up the handler by the parsed routing key
+//  4. Unmarshal the payload to the handler's type
+//  5. Validate the payload if it implements Validatable
+//  6. Call the handler
+//  7. Call the source's Complete callback if provided
 //
 // Hooks are called at appropriate points throughout this flow.
 //
@@ -130,18 +162,16 @@ func RegisterFunc[T any](r *Router, key string, fn func(ctx context.Context, pay
 //	    return router.Process(ctx, event)
 //	}
 func (r *Router) Process(ctx context.Context, raw []byte) error {
-	// Try each source until one matches
-	var parsed Parsed
-	var source Source
-	for _, src := range r.sources {
-		if p, ok := src.Parse(raw); ok {
-			parsed = p
-			source = src
-			break
-		}
+	// Find matching source using discriminators
+	source := r.match(raw)
+	if source == nil {
+		return r.handleNoSource(ctx, raw)
 	}
 
-	if source == nil {
+	// Parse with matched source
+	parsed, ok := source.Parse(raw)
+	if !ok {
+		// Discriminator matched but parse failed - treat as no source
 		return r.handleNoSource(ctx, raw)
 	}
 
@@ -185,6 +215,36 @@ func (r *Router) Process(ctx context.Context, raw []byte) error {
 	}
 
 	return err
+}
+
+// match finds a source whose discriminator matches the raw message.
+func (r *Router) match(raw []byte) Source {
+	// Try default group first
+	if len(r.defaultSources) > 0 {
+		view, err := r.defaultInspector.Inspect(raw)
+		if err == nil {
+			for _, src := range r.defaultSources {
+				if src.Discriminator().Match(view) {
+					return src
+				}
+			}
+		}
+	}
+
+	// Try custom groups in order
+	for _, g := range r.groups {
+		view, err := g.inspector.Inspect(raw)
+		if err != nil {
+			continue
+		}
+		for _, src := range g.sources {
+			if src.Discriminator().Match(view) {
+				return src
+			}
+		}
+	}
+
+	return nil
 }
 
 // callOnParse calls global and source OnParse hooks.

@@ -47,8 +47,8 @@ type hooks struct {
 	onValidationError []OnValidationErrorFunc
 }
 
-// Option configures hook behavior.
-type Option func(*hooks)
+// Option configures Router behavior.
+type Option func(*Router)
 
 // WithOnParse adds a hook called after a source successfully parses a message.
 // Multiple hooks are called in order, with context chaining through each.
@@ -59,8 +59,8 @@ type Option func(*hooks)
 //	    return logx.WithCtx(ctx, slog.String("source", source))
 //	})
 func WithOnParse(fn OnParseFunc) Option {
-	return func(h *hooks) {
-		h.onParse = append(h.onParse, fn)
+	return func(r *Router) {
+		r.hooks.onParse = append(r.hooks.onParse, fn)
 	}
 }
 
@@ -73,8 +73,8 @@ func WithOnParse(fn OnParseFunc) Option {
 //	    logger.Info(ctx, "dispatching event", "key", key)
 //	})
 func WithOnDispatch(fn OnDispatchFunc) Option {
-	return func(h *hooks) {
-		h.onDispatch = append(h.onDispatch, fn)
+	return func(r *Router) {
+		r.hooks.onDispatch = append(r.hooks.onDispatch, fn)
 	}
 }
 
@@ -87,8 +87,8 @@ func WithOnDispatch(fn OnDispatchFunc) Option {
 //	    metrics.Timing("dispatch.success", d, "source:"+source)
 //	})
 func WithOnSuccess(fn OnSuccessFunc) Option {
-	return func(h *hooks) {
-		h.onSuccess = append(h.onSuccess, fn)
+	return func(r *Router) {
+		r.hooks.onSuccess = append(r.hooks.onSuccess, fn)
 	}
 }
 
@@ -102,8 +102,8 @@ func WithOnSuccess(fn OnSuccessFunc) Option {
 //	    logger.Error(ctx, "handler failed", "error", err)
 //	})
 func WithOnFailure(fn OnFailureFunc) Option {
-	return func(h *hooks) {
-		h.onFailure = append(h.onFailure, fn)
+	return func(r *Router) {
+		r.hooks.onFailure = append(r.hooks.onFailure, fn)
 	}
 }
 
@@ -118,8 +118,8 @@ func WithOnFailure(fn OnFailureFunc) Option {
 //	    return nil // skip to DLQ
 //	})
 func WithOnNoSource(fn OnNoSourceFunc) Option {
-	return func(h *hooks) {
-		h.onNoSource = append(h.onNoSource, fn)
+	return func(r *Router) {
+		r.hooks.onNoSource = append(r.hooks.onNoSource, fn)
 	}
 }
 
@@ -134,8 +134,8 @@ func WithOnNoSource(fn OnNoSourceFunc) Option {
 //	    return nil // skip
 //	})
 func WithOnNoHandler(fn OnNoHandlerFunc) Option {
-	return func(h *hooks) {
-		h.onNoHandler = append(h.onNoHandler, fn)
+	return func(r *Router) {
+		r.hooks.onNoHandler = append(r.hooks.onNoHandler, fn)
 	}
 }
 
@@ -150,8 +150,8 @@ func WithOnNoHandler(fn OnNoHandlerFunc) Option {
 //	    return nil // skip bad payloads
 //	})
 func WithOnUnmarshalError(fn OnUnmarshalErrorFunc) Option {
-	return func(h *hooks) {
-		h.onUnmarshalError = append(h.onUnmarshalError, fn)
+	return func(r *Router) {
+		r.hooks.onUnmarshalError = append(r.hooks.onUnmarshalError, fn)
 	}
 }
 
@@ -166,8 +166,8 @@ func WithOnUnmarshalError(fn OnUnmarshalErrorFunc) Option {
 //	    return nil // skip invalid payloads
 //	})
 func WithOnValidationError(fn OnValidationErrorFunc) Option {
-	return func(h *hooks) {
-		h.onValidationError = append(h.onValidationError, fn)
+	return func(r *Router) {
+		r.hooks.onValidationError = append(r.hooks.onValidationError, fn)
 	}
 }
 
