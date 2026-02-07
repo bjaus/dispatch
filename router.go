@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync/atomic"
 	"time"
 )
 
@@ -33,6 +34,9 @@ type Router struct {
 	groups           []group
 	handlers         map[string]invoker
 	hooks            hooks
+
+	// Adaptive ordering: try last successful source first
+	lastMatch atomic.Value // stores string
 }
 
 // group holds sources that share an inspector.
@@ -218,7 +222,57 @@ func (r *Router) Process(ctx context.Context, raw []byte) error {
 }
 
 // match finds a source whose discriminator matches the raw message.
+// Uses adaptive ordering to try the last successful source first.
 func (r *Router) match(raw []byte) Source {
+	// Try last successful source first (fast path)
+	if v := r.lastMatch.Load(); v != nil {
+		if lastMatch := v.(string); lastMatch != "" {
+			if src := r.trySource(raw, lastMatch); src != nil {
+				return src
+			}
+		}
+	}
+
+	// Full search through all groups
+	src := r.matchAll(raw)
+	if src != nil {
+		r.lastMatch.Store(src.Name())
+	}
+	return src
+}
+
+// trySource attempts to match a specific source by name.
+func (r *Router) trySource(raw []byte, name string) Source {
+	// Check default sources
+	if len(r.defaultSources) > 0 {
+		view, err := r.defaultInspector.Inspect(raw)
+		if err == nil {
+			for _, src := range r.defaultSources {
+				if src.Name() == name && src.Discriminator().Match(view) {
+					return src
+				}
+			}
+		}
+	}
+
+	// Check custom groups
+	for _, g := range r.groups {
+		view, err := g.inspector.Inspect(raw)
+		if err != nil {
+			continue
+		}
+		for _, src := range g.sources {
+			if src.Name() == name && src.Discriminator().Match(view) {
+				return src
+			}
+		}
+	}
+
+	return nil
+}
+
+// matchAll searches all groups for a matching source.
+func (r *Router) matchAll(raw []byte) Source {
 	// Try default group first
 	if len(r.defaultSources) > 0 {
 		view, err := r.defaultInspector.Inspect(raw)

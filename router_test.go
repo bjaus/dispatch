@@ -259,6 +259,104 @@ func (m *mockInspector) Inspect(raw []byte) (View, error) {
 	return JSONInspector().Inspect(raw)
 }
 
+func TestRouter_AdaptiveOrdering(t *testing.T) {
+	t.Run("last matched source is tried first", func(t *testing.T) {
+		var matchOrder []string
+
+		r := New()
+
+		// First source - matches "first" type
+		r.AddSource(SourceFunc("first-source", HasFields("first"), func(raw []byte) (Parsed, bool) {
+			matchOrder = append(matchOrder, "first-source")
+			var env struct {
+				First   bool            `json:"first"`
+				Type    string          `json:"type"`
+				Payload json.RawMessage `json:"payload"`
+			}
+			if err := json.Unmarshal(raw, &env); err != nil || !env.First {
+				return Parsed{}, false
+			}
+			return Parsed{Key: env.Type, Payload: env.Payload}, true
+		}))
+
+		// Second source - matches "second" type
+		r.AddSource(SourceFunc("second-source", HasFields("second"), func(raw []byte) (Parsed, bool) {
+			matchOrder = append(matchOrder, "second-source")
+			var env struct {
+				Second  bool            `json:"second"`
+				Type    string          `json:"type"`
+				Payload json.RawMessage `json:"payload"`
+			}
+			if err := json.Unmarshal(raw, &env); err != nil || !env.Second {
+				return Parsed{}, false
+			}
+			return Parsed{Key: env.Type, Payload: env.Payload}, true
+		}))
+
+		Register(r, "test", &testHandler{})
+
+		// First message matches second source
+		msg1 := []byte(`{"second": true, "type": "test", "payload": {}}`)
+		_ = r.Process(context.Background(), msg1)
+
+		// Clear order tracking
+		matchOrder = nil
+
+		// Second message also matches second source - should try it first
+		msg2 := []byte(`{"second": true, "type": "test", "payload": {}}`)
+		_ = r.Process(context.Background(), msg2)
+
+		// Second source should be tried first due to adaptive ordering
+		if len(matchOrder) == 0 {
+			t.Fatal("no sources were tried")
+		}
+		if matchOrder[0] != "second-source" {
+			t.Errorf("first tried source = %q, want %q", matchOrder[0], "second-source")
+		}
+	})
+
+	t.Run("falls back to full search when last match fails", func(t *testing.T) {
+		r := New()
+
+		r.AddSource(SourceFunc("first-source", HasFields("first"), func(raw []byte) (Parsed, bool) {
+			var env struct {
+				First   bool            `json:"first"`
+				Type    string          `json:"type"`
+				Payload json.RawMessage `json:"payload"`
+			}
+			if err := json.Unmarshal(raw, &env); err != nil || !env.First {
+				return Parsed{}, false
+			}
+			return Parsed{Key: env.Type, Payload: env.Payload}, true
+		}))
+
+		r.AddSource(SourceFunc("second-source", HasFields("second"), func(raw []byte) (Parsed, bool) {
+			var env struct {
+				Second  bool            `json:"second"`
+				Type    string          `json:"type"`
+				Payload json.RawMessage `json:"payload"`
+			}
+			if err := json.Unmarshal(raw, &env); err != nil || !env.Second {
+				return Parsed{}, false
+			}
+			return Parsed{Key: env.Type, Payload: env.Payload}, true
+		}))
+
+		Register(r, "test", &testHandler{})
+
+		// Prime with second source
+		msg1 := []byte(`{"second": true, "type": "test", "payload": {}}`)
+		_ = r.Process(context.Background(), msg1)
+
+		// Now send message that matches first source
+		msg2 := []byte(`{"first": true, "type": "test", "payload": {}}`)
+		err := r.Process(context.Background(), msg2)
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+}
+
 func TestRouter_Hooks(t *testing.T) {
 	t.Run("OnParse is called with source and key", func(t *testing.T) {
 		var gotSource, gotKey string
