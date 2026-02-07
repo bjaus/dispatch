@@ -399,13 +399,12 @@ func (r *Router) handleUnmarshalError(ctx context.Context, source Source, source
 		}
 	}
 
-	resultErr := err
-	if len(errs) > 0 {
+	var resultErr error
+	switch {
+	case len(errs) > 0:
 		resultErr = errs[0]
-	} else if len(r.hooks.onUnmarshalError) == 0 {
+	case len(r.hooks.onUnmarshalError) == 0:
 		resultErr = fmt.Errorf("unmarshal payload: %w", err)
-	} else {
-		resultErr = nil
 	}
 
 	if complete != nil {
@@ -431,13 +430,12 @@ func (r *Router) handleValidationError(ctx context.Context, source Source, sourc
 		}
 	}
 
-	resultErr := err
-	if len(errs) > 0 {
+	var resultErr error
+	switch {
+	case len(errs) > 0:
 		resultErr = errs[0]
-	} else if len(r.hooks.onValidationError) == 0 {
+	case len(r.hooks.onValidationError) == 0:
 		resultErr = fmt.Errorf("validate payload: %w", err)
-	} else {
-		resultErr = nil
 	}
 
 	if complete != nil {

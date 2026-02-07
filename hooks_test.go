@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+type contextKey string
+
 // sourceWithHooks implements optional hook interfaces for testing.
 type sourceWithHooks struct {
 	name string
@@ -44,7 +46,7 @@ func (s *sourceWithHooks) Parse(raw []byte) (Parsed, bool) {
 
 func (s *sourceWithHooks) OnParse(ctx context.Context, key string) context.Context {
 	s.onParseCalled = true
-	return context.WithValue(ctx, "source-hook", "called")
+	return context.WithValue(ctx, contextKey("source-hook"), "called")
 }
 
 func (s *sourceWithHooks) OnDispatch(ctx context.Context, key string) {
@@ -262,7 +264,7 @@ func TestSourceHooks_ContextPropagation(t *testing.T) {
 		msg := []byte(`{"type": "test", "payload": {}}`)
 		_ = r.Process(context.Background(), msg)
 
-		if handlerCtx.Value("source-hook") != "called" {
+		if handlerCtx.Value(contextKey("source-hook")) != "called" {
 			t.Error("source OnParse context not propagated to handler")
 		}
 	})

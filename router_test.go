@@ -25,8 +25,7 @@ func (h *testHandler) Handle(ctx context.Context, p testPayload) error {
 }
 
 type testSource struct {
-	name      string
-	shouldErr bool
+	name string
 }
 
 func (s *testSource) Name() string { return s.name }
