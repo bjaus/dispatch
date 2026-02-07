@@ -221,20 +221,57 @@ func (r *Router) Process(ctx context.Context, raw []byte) error {
 	return err
 }
 
+// viewCache caches parsed views per inspector to avoid re-parsing the same
+// raw bytes multiple times during source matching.
+type viewCache struct {
+	raw   []byte
+	views map[Inspector]viewResult
+}
+
+type viewResult struct {
+	view View
+	ok   bool
+}
+
+func newViewCache(raw []byte) *viewCache {
+	return &viewCache{
+		raw:   raw,
+		views: make(map[Inspector]viewResult),
+	}
+}
+
+// get returns a cached view or parses and caches it.
+func (c *viewCache) get(insp Inspector) (View, bool) {
+	if result, ok := c.views[insp]; ok {
+		return result.view, result.ok
+	}
+
+	view, err := insp.Inspect(c.raw)
+	if err != nil {
+		c.views[insp] = viewResult{ok: false}
+		return nil, false
+	}
+
+	c.views[insp] = viewResult{view: view, ok: true}
+	return view, true
+}
+
 // match finds a source whose discriminator matches the raw message.
 // Uses adaptive ordering to try the last successful source first.
 func (r *Router) match(raw []byte) Source {
+	cache := newViewCache(raw)
+
 	// Try last successful source first (fast path)
 	if v := r.lastMatch.Load(); v != nil {
 		if lastMatch := v.(string); lastMatch != "" {
-			if src := r.trySource(raw, lastMatch); src != nil {
+			if src := r.trySource(cache, lastMatch); src != nil {
 				return src
 			}
 		}
 	}
 
 	// Full search through all groups
-	src := r.matchAll(raw)
+	src := r.matchAll(cache)
 	if src != nil {
 		r.lastMatch.Store(src.Name())
 	}
@@ -242,11 +279,10 @@ func (r *Router) match(raw []byte) Source {
 }
 
 // trySource attempts to match a specific source by name.
-func (r *Router) trySource(raw []byte, name string) Source {
+func (r *Router) trySource(cache *viewCache, name string) Source {
 	// Check default sources
 	if len(r.defaultSources) > 0 {
-		view, err := r.defaultInspector.Inspect(raw)
-		if err == nil {
+		if view, ok := cache.get(r.defaultInspector); ok {
 			for _, src := range r.defaultSources {
 				if src.Name() == name && src.Discriminator().Match(view) {
 					return src
@@ -257,8 +293,8 @@ func (r *Router) trySource(raw []byte, name string) Source {
 
 	// Check custom groups
 	for _, g := range r.groups {
-		view, err := g.inspector.Inspect(raw)
-		if err != nil {
+		view, ok := cache.get(g.inspector)
+		if !ok {
 			continue
 		}
 		for _, src := range g.sources {
@@ -272,11 +308,10 @@ func (r *Router) trySource(raw []byte, name string) Source {
 }
 
 // matchAll searches all groups for a matching source.
-func (r *Router) matchAll(raw []byte) Source {
+func (r *Router) matchAll(cache *viewCache) Source {
 	// Try default group first
 	if len(r.defaultSources) > 0 {
-		view, err := r.defaultInspector.Inspect(raw)
-		if err == nil {
+		if view, ok := cache.get(r.defaultInspector); ok {
 			for _, src := range r.defaultSources {
 				if src.Discriminator().Match(view) {
 					return src
@@ -287,8 +322,8 @@ func (r *Router) matchAll(raw []byte) Source {
 
 	// Try custom groups in order
 	for _, g := range r.groups {
-		view, err := g.inspector.Inspect(raw)
-		if err != nil {
+		view, ok := cache.get(g.inspector)
+		if !ok {
 			continue
 		}
 		for _, src := range g.sources {

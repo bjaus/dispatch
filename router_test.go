@@ -1137,3 +1137,264 @@ func TestRouter_TrySourceInspectorFailsInCustomGroup(t *testing.T) {
 
 	assert.Error(t, err)
 }
+
+// countingInspector tracks how many times Inspect is called.
+type countingInspector struct {
+	count int
+}
+
+func (c *countingInspector) Inspect(raw []byte) (View, error) {
+	c.count++
+	return JSONInspector().Inspect(raw)
+}
+
+func (c *countingInspector) reset() {
+	c.count = 0
+}
+
+type ViewCachingSuite struct {
+	suite.Suite
+}
+
+func TestViewCachingSuite(t *testing.T) {
+	suite.Run(t, new(ViewCachingSuite))
+}
+
+func (s *ViewCachingSuite) TestInspectorCalledOnceWhenTrySourceSucceeds() {
+	inspector := &countingInspector{}
+
+	r := New(WithInspector(inspector))
+
+	source := SourceFunc("test-source", HasFields("type"), func(raw []byte) (Parsed, bool) {
+		var env struct {
+			Type    string          `json:"type"`
+			Payload json.RawMessage `json:"payload"`
+		}
+		if json.Unmarshal(raw, &env) != nil || env.Type == "" {
+			return Parsed{}, false
+		}
+		return Parsed{Key: env.Type, Payload: env.Payload}, true
+	})
+	r.AddSource(source)
+	Register(r, "test", &testHandler{})
+
+	// First message - no lastMatch, goes through matchAll
+	msg := []byte(`{"type": "test", "payload": {}}`)
+	err := r.Process(context.Background(), msg)
+	s.Require().NoError(err)
+
+	// Inspector should be called exactly once
+	s.Assert().Equal(1, inspector.count)
+}
+
+func (s *ViewCachingSuite) TestInspectorCalledOnceWhenTrySourceFailsAndMatchAllSucceeds() {
+	inspector := &countingInspector{}
+
+	r := New(WithInspector(inspector))
+
+	// Source A - matches "a" field
+	sourceA := SourceFunc("source-a", HasFields("a"), func(raw []byte) (Parsed, bool) {
+		var env struct {
+			A       bool            `json:"a"`
+			Type    string          `json:"type"`
+			Payload json.RawMessage `json:"payload"`
+		}
+		if json.Unmarshal(raw, &env) != nil || !env.A {
+			return Parsed{}, false
+		}
+		return Parsed{Key: env.Type, Payload: env.Payload}, true
+	})
+
+	// Source B - matches "b" field
+	sourceB := SourceFunc("source-b", HasFields("b"), func(raw []byte) (Parsed, bool) {
+		var env struct {
+			B       bool            `json:"b"`
+			Type    string          `json:"type"`
+			Payload json.RawMessage `json:"payload"`
+		}
+		if json.Unmarshal(raw, &env) != nil || !env.B {
+			return Parsed{}, false
+		}
+		return Parsed{Key: env.Type, Payload: env.Payload}, true
+	})
+
+	r.AddSource(sourceA)
+	r.AddSource(sourceB)
+	Register(r, "test", &testHandler{})
+
+	// Prime with source-a
+	msg1 := []byte(`{"a": true, "type": "test", "payload": {}}`)
+	err := r.Process(context.Background(), msg1)
+	s.Require().NoError(err)
+	inspector.reset()
+
+	// Now send message that matches source-b
+	// trySource will try "source-a" first (lastMatch), fail
+	// matchAll will find "source-b"
+	// With caching, inspector should only be called ONCE
+	msg2 := []byte(`{"b": true, "type": "test", "payload": {}}`)
+	err = r.Process(context.Background(), msg2)
+
+	s.Require().NoError(err)
+	s.Assert().Equal(1, inspector.count, "inspector should only be called once due to view caching")
+}
+
+func (s *ViewCachingSuite) TestInspectorCalledOncePerGroupWithMultipleGroups() {
+	defaultInspector := &countingInspector{}
+	group1Inspector := &countingInspector{}
+	group2Inspector := &countingInspector{}
+
+	r := New(WithInspector(defaultInspector))
+
+	// Default source - won't match
+	defaultSource := SourceFunc("default", HasFields("default_field"), func(raw []byte) (Parsed, bool) {
+		return Parsed{}, false
+	})
+	r.AddSource(defaultSource)
+
+	// Group 1 source - won't match
+	group1Source := SourceFunc("group1", HasFields("group1_field"), func(raw []byte) (Parsed, bool) {
+		return Parsed{}, false
+	})
+	r.AddGroup(group1Inspector, group1Source)
+
+	// Group 2 source - will match
+	group2Source := SourceFunc("group2", HasFields("group2_field"), func(raw []byte) (Parsed, bool) {
+		var env struct {
+			Type    string          `json:"type"`
+			Payload json.RawMessage `json:"payload"`
+		}
+		if json.Unmarshal(raw, &env) != nil {
+			return Parsed{}, false
+		}
+		return Parsed{Key: env.Type, Payload: env.Payload}, true
+	})
+	r.AddGroup(group2Inspector, group2Source)
+
+	Register(r, "test", &testHandler{})
+
+	msg := []byte(`{"group2_field": true, "type": "test", "payload": {}}`)
+	err := r.Process(context.Background(), msg)
+
+	s.Require().NoError(err)
+	s.Assert().Equal(1, defaultInspector.count, "default inspector should be called once")
+	s.Assert().Equal(1, group1Inspector.count, "group1 inspector should be called once")
+	s.Assert().Equal(1, group2Inspector.count, "group2 inspector should be called once")
+}
+
+func (s *ViewCachingSuite) TestSameInspectorSharedAcrossGroupsCalledOnce() {
+	sharedInspector := &countingInspector{}
+
+	r := New(WithInspector(sharedInspector))
+
+	// Default source - won't match
+	defaultSource := SourceFunc("default", HasFields("default_field"), func(raw []byte) (Parsed, bool) {
+		return Parsed{}, false
+	})
+	r.AddSource(defaultSource)
+
+	// Custom group using the SAME inspector
+	customSource := SourceFunc("custom", HasFields("custom_field"), func(raw []byte) (Parsed, bool) {
+		var env struct {
+			Type    string          `json:"type"`
+			Payload json.RawMessage `json:"payload"`
+		}
+		if json.Unmarshal(raw, &env) != nil {
+			return Parsed{}, false
+		}
+		return Parsed{Key: env.Type, Payload: env.Payload}, true
+	})
+	r.AddGroup(sharedInspector, customSource)
+
+	Register(r, "test", &testHandler{})
+
+	msg := []byte(`{"custom_field": true, "type": "test", "payload": {}}`)
+	err := r.Process(context.Background(), msg)
+
+	s.Require().NoError(err)
+	// Same inspector used for default group and custom group - should only be called once
+	s.Assert().Equal(1, sharedInspector.count, "shared inspector should only be called once")
+}
+
+func (s *ViewCachingSuite) TestViewCacheHandlesInspectorError() {
+	failingInspector := &mockInspector{err: ErrInvalidJSON}
+	workingInspector := &countingInspector{}
+
+	r := New(WithInspector(failingInspector))
+
+	// Default source with failing inspector
+	defaultSource := SourceFunc("default", HasFields("x"), func(raw []byte) (Parsed, bool) {
+		return Parsed{}, false
+	})
+	r.AddSource(defaultSource)
+
+	// Custom group with working inspector
+	customSource := SourceFunc("custom", HasFields("type"), func(raw []byte) (Parsed, bool) {
+		var env struct {
+			Type    string          `json:"type"`
+			Payload json.RawMessage `json:"payload"`
+		}
+		if json.Unmarshal(raw, &env) != nil {
+			return Parsed{}, false
+		}
+		return Parsed{Key: env.Type, Payload: env.Payload}, true
+	})
+	r.AddGroup(workingInspector, customSource)
+
+	Register(r, "test", &testHandler{})
+
+	msg := []byte(`{"type": "test", "payload": {}}`)
+	err := r.Process(context.Background(), msg)
+
+	s.Require().NoError(err)
+	s.Assert().Equal(1, workingInspector.count)
+}
+
+func (s *ViewCachingSuite) TestViewCacheCachesFailureResult() {
+	// Inspector that fails but counts calls
+	failingInspector := &failingCountingInspector{}
+	workingInspector := &countingInspector{}
+
+	r := New(WithInspector(failingInspector))
+
+	// Add multiple sources to default group to force multiple discriminator checks
+	r.AddSource(SourceFunc("src1", HasFields("a"), func(raw []byte) (Parsed, bool) {
+		return Parsed{}, false
+	}))
+	r.AddSource(SourceFunc("src2", HasFields("b"), func(raw []byte) (Parsed, bool) {
+		return Parsed{}, false
+	}))
+
+	// Custom group with working inspector
+	customSource := SourceFunc("custom", HasFields("type"), func(raw []byte) (Parsed, bool) {
+		var env struct {
+			Type    string          `json:"type"`
+			Payload json.RawMessage `json:"payload"`
+		}
+		if json.Unmarshal(raw, &env) != nil {
+			return Parsed{}, false
+		}
+		return Parsed{Key: env.Type, Payload: env.Payload}, true
+	})
+	r.AddGroup(workingInspector, customSource)
+
+	Register(r, "test", &testHandler{})
+
+	msg := []byte(`{"type": "test", "payload": {}}`)
+	err := r.Process(context.Background(), msg)
+
+	s.Require().NoError(err)
+	// Failing inspector should only be called once, even with multiple sources
+	s.Assert().Equal(1, failingInspector.count, "failing inspector should only be called once (result cached)")
+	s.Assert().Equal(1, workingInspector.count)
+}
+
+// failingCountingInspector always fails but counts calls.
+type failingCountingInspector struct {
+	count int
+}
+
+func (f *failingCountingInspector) Inspect(raw []byte) (View, error) {
+	f.count++
+	return nil, ErrInvalidJSON
+}
