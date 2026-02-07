@@ -6,6 +6,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/suite"
 )
 
 type contextKey string
@@ -88,184 +90,173 @@ var (
 	_ OnValidationErrorHook = (*sourceWithHooks)(nil)
 )
 
-func TestSourceHooks(t *testing.T) {
-	t.Run("OnParse is called after global", func(t *testing.T) {
-		var order []string
-
-		source := &sourceWithHooks{name: "test"}
-
-		r := New(WithOnParse(func(ctx context.Context, src, key string) context.Context {
-			order = append(order, "global")
-			return ctx
-		}))
-		r.AddSource(source)
-		Register(r, "test", &testHandler{})
-
-		msg := []byte(`{"type": "test", "payload": {}}`)
-		_ = r.Process(context.Background(), msg)
-
-		if !source.onParseCalled {
-			t.Error("source OnParse not called")
-		}
-
-		// Check order by examining the context (source hook adds to it)
-		// and verifying global was called first
-		if len(order) != 1 || order[0] != "global" {
-			t.Errorf("order = %v, want [global]", order)
-		}
-	})
-
-	t.Run("OnDispatch is called after global", func(t *testing.T) {
-		var order []string
-
-		source := &sourceWithHooks{name: "test"}
-
-		r := New(WithOnDispatch(func(ctx context.Context, src, key string) {
-			order = append(order, "global")
-		}))
-		r.AddSource(source)
-		Register(r, "test", &testHandler{})
-
-		msg := []byte(`{"type": "test", "payload": {}}`)
-		_ = r.Process(context.Background(), msg)
-
-		if !source.onDispatchCalled {
-			t.Error("source OnDispatch not called")
-		}
-		if len(order) != 1 || order[0] != "global" {
-			t.Errorf("order = %v, want [global]", order)
-		}
-	})
-
-	t.Run("OnSuccess is called after global", func(t *testing.T) {
-		var order []string
-
-		source := &sourceWithHooks{name: "test"}
-
-		r := New(WithOnSuccess(func(ctx context.Context, src, key string, d time.Duration) {
-			order = append(order, "global")
-		}))
-		r.AddSource(source)
-		Register(r, "test", &testHandler{})
-
-		msg := []byte(`{"type": "test", "payload": {}}`)
-		_ = r.Process(context.Background(), msg)
-
-		if !source.onSuccessCalled {
-			t.Error("source OnSuccess not called")
-		}
-		if len(order) != 1 || order[0] != "global" {
-			t.Errorf("order = %v, want [global]", order)
-		}
-	})
-
-	t.Run("OnFailure is called after global", func(t *testing.T) {
-		var order []string
-
-		source := &sourceWithHooks{name: "test"}
-
-		r := New(WithOnFailure(func(ctx context.Context, src, key string, err error, d time.Duration) {
-			order = append(order, "global")
-		}))
-		r.AddSource(source)
-		Register(r, "test", &testHandler{err: errors.New("fail")})
-
-		msg := []byte(`{"type": "test", "payload": {}}`)
-		_ = r.Process(context.Background(), msg)
-
-		if !source.onFailureCalled {
-			t.Error("source OnFailure not called")
-		}
-		if len(order) != 1 || order[0] != "global" {
-			t.Errorf("order = %v, want [global]", order)
-		}
-	})
-
-	t.Run("source OnNoHandler can override global skip", func(t *testing.T) {
-		source := &sourceWithHooks{
-			name:           "test",
-			onNoHandlerErr: errors.New("source says fail"),
-		}
-
-		r := New(WithOnNoHandler(func(ctx context.Context, src, key string) error {
-			return nil // global says skip
-		}))
-		r.AddSource(source)
-
-		msg := []byte(`{"type": "unknown", "payload": {}}`)
-		err := r.Process(context.Background(), msg)
-
-		if !source.onNoHandlerCalled {
-			t.Error("source OnNoHandler not called")
-		}
-		if err == nil {
-			t.Error("expected error from source hook")
-		}
-	})
-
-	t.Run("global OnNoHandler error prevents source hook from running for that error path", func(t *testing.T) {
-		globalErr := errors.New("global error")
-		source := &sourceWithHooks{
-			name:           "test",
-			onNoHandlerErr: errors.New("source error"),
-		}
-
-		r := New(WithOnNoHandler(func(ctx context.Context, src, key string) error {
-			return globalErr // global fails first
-		}))
-		r.AddSource(source)
-
-		msg := []byte(`{"type": "unknown", "payload": {}}`)
-		err := r.Process(context.Background(), msg)
-
-		// Both hooks are called, but first error wins
-		if !errors.Is(err, globalErr) {
-			t.Errorf("error = %v, want %v", err, globalErr)
-		}
-	})
-
-	t.Run("source OnUnmarshalError can override global", func(t *testing.T) {
-		source := &sourceWithHooks{
-			name:                "test",
-			onUnmarshalErrorErr: errors.New("source says fail"),
-		}
-
-		r := New(WithOnUnmarshalError(func(ctx context.Context, src, key string, err error) error {
-			return nil // global says skip
-		}))
-		r.AddSource(source)
-		Register(r, "test", &testHandler{})
-
-		msg := []byte(`{"type": "test", "payload": "invalid"}`)
-		err := r.Process(context.Background(), msg)
-
-		if !source.onUnmarshalErrorCalled {
-			t.Error("source OnUnmarshalError not called")
-		}
-		if err == nil {
-			t.Error("expected error from source hook")
-		}
-	})
+type SourceHooksSuite struct {
+	suite.Suite
 }
 
-func TestSourceHooks_ContextPropagation(t *testing.T) {
-	t.Run("source OnParse context is available to handler", func(t *testing.T) {
-		source := &sourceWithHooks{name: "test"}
+func TestSourceHooksSuite(t *testing.T) {
+	suite.Run(t, new(SourceHooksSuite))
+}
 
-		var handlerCtx context.Context
-		r := New()
-		r.AddSource(source)
+func (s *SourceHooksSuite) TestOnParseCalledAfterGlobal() {
+	var order []string
 
-		RegisterFunc(r, "test", func(ctx context.Context, p testPayload) error {
-			handlerCtx = ctx
-			return nil
-		})
+	source := &sourceWithHooks{name: "test"}
 
-		msg := []byte(`{"type": "test", "payload": {}}`)
-		_ = r.Process(context.Background(), msg)
+	r := New(WithOnParse(func(ctx context.Context, src, key string) context.Context {
+		order = append(order, "global")
+		return ctx
+	}))
+	r.AddSource(source)
+	Register(r, "test", &testHandler{})
 
-		if handlerCtx.Value(contextKey("source-hook")) != "called" {
-			t.Error("source OnParse context not propagated to handler")
-		}
+	msg := []byte(`{"type": "test", "payload": {}}`)
+	err := r.Process(context.Background(), msg)
+
+	s.NoError(err)
+	s.Assert().True(source.onParseCalled)
+	s.Require().Len(order, 1)
+	s.Assert().Equal("global", order[0])
+}
+
+func (s *SourceHooksSuite) TestOnDispatchCalledAfterGlobal() {
+	var order []string
+
+	source := &sourceWithHooks{name: "test"}
+
+	r := New(WithOnDispatch(func(ctx context.Context, src, key string) {
+		order = append(order, "global")
+	}))
+	r.AddSource(source)
+	Register(r, "test", &testHandler{})
+
+	msg := []byte(`{"type": "test", "payload": {}}`)
+	err := r.Process(context.Background(), msg)
+
+	s.NoError(err)
+	s.Assert().True(source.onDispatchCalled)
+	s.Require().Len(order, 1)
+	s.Assert().Equal("global", order[0])
+}
+
+func (s *SourceHooksSuite) TestOnSuccessCalledAfterGlobal() {
+	var order []string
+
+	source := &sourceWithHooks{name: "test"}
+
+	r := New(WithOnSuccess(func(ctx context.Context, src, key string, d time.Duration) {
+		order = append(order, "global")
+	}))
+	r.AddSource(source)
+	Register(r, "test", &testHandler{})
+
+	msg := []byte(`{"type": "test", "payload": {}}`)
+	err := r.Process(context.Background(), msg)
+
+	s.NoError(err)
+	s.Assert().True(source.onSuccessCalled)
+	s.Require().Len(order, 1)
+	s.Assert().Equal("global", order[0])
+}
+
+func (s *SourceHooksSuite) TestOnFailureCalledAfterGlobal() {
+	var order []string
+
+	source := &sourceWithHooks{name: "test"}
+
+	r := New(WithOnFailure(func(ctx context.Context, src, key string, err error, d time.Duration) {
+		order = append(order, "global")
+	}))
+	r.AddSource(source)
+	Register(r, "test", &testHandler{err: errors.New("fail")})
+
+	msg := []byte(`{"type": "test", "payload": {}}`)
+	err := r.Process(context.Background(), msg)
+
+	s.Error(err)
+	s.Assert().True(source.onFailureCalled)
+	s.Require().Len(order, 1)
+	s.Assert().Equal("global", order[0])
+}
+
+func (s *SourceHooksSuite) TestSourceOnNoHandlerCanOverrideGlobalSkip() {
+	source := &sourceWithHooks{
+		name:           "test",
+		onNoHandlerErr: errors.New("source says fail"),
+	}
+
+	r := New(WithOnNoHandler(func(ctx context.Context, src, key string) error {
+		return nil
+	}))
+	r.AddSource(source)
+
+	msg := []byte(`{"type": "unknown", "payload": {}}`)
+	err := r.Process(context.Background(), msg)
+
+	s.Assert().True(source.onNoHandlerCalled)
+	s.Assert().Error(err)
+}
+
+func (s *SourceHooksSuite) TestGlobalOnNoHandlerErrorPreventsSourceHook() {
+	globalErr := errors.New("global error")
+	source := &sourceWithHooks{
+		name:           "test",
+		onNoHandlerErr: errors.New("source error"),
+	}
+
+	r := New(WithOnNoHandler(func(ctx context.Context, src, key string) error {
+		return globalErr
+	}))
+	r.AddSource(source)
+
+	msg := []byte(`{"type": "unknown", "payload": {}}`)
+	err := r.Process(context.Background(), msg)
+
+	s.Assert().ErrorIs(err, globalErr)
+}
+
+func (s *SourceHooksSuite) TestSourceOnUnmarshalErrorCanOverrideGlobal() {
+	source := &sourceWithHooks{
+		name:                "test",
+		onUnmarshalErrorErr: errors.New("source says fail"),
+	}
+
+	r := New(WithOnUnmarshalError(func(ctx context.Context, src, key string, err error) error {
+		return nil
+	}))
+	r.AddSource(source)
+	Register(r, "test", &testHandler{})
+
+	msg := []byte(`{"type": "test", "payload": "invalid"}`)
+	err := r.Process(context.Background(), msg)
+
+	s.Assert().True(source.onUnmarshalErrorCalled)
+	s.Assert().Error(err)
+}
+
+type SourceHooksContextPropagationSuite struct {
+	suite.Suite
+}
+
+func TestSourceHooksContextPropagationSuite(t *testing.T) {
+	suite.Run(t, new(SourceHooksContextPropagationSuite))
+}
+
+func (s *SourceHooksContextPropagationSuite) TestSourceOnParseContextAvailableToHandler() {
+	source := &sourceWithHooks{name: "test"}
+
+	var handlerCtx context.Context
+	r := New()
+	r.AddSource(source)
+
+	RegisterFunc(r, "test", func(ctx context.Context, p testPayload) error {
+		handlerCtx = ctx
+		return nil
 	})
+
+	msg := []byte(`{"type": "test", "payload": {}}`)
+	err := r.Process(context.Background(), msg)
+
+	s.NoError(err)
+	s.Assert().Equal("called", handlerCtx.Value(contextKey("source-hook")))
 }

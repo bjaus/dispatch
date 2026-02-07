@@ -2,39 +2,50 @@ package dispatch
 
 import (
 	"testing"
+
+	"github.com/stretchr/testify/suite"
 )
 
-func TestJSONInspector_Inspect(t *testing.T) {
-	inspector := JSONInspector()
-
-	t.Run("returns view for valid JSON", func(t *testing.T) {
-		raw := []byte(`{"foo": "bar"}`)
-		view, err := inspector.Inspect(raw)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if view == nil {
-			t.Fatal("expected view, got nil")
-		}
-	})
-
-	t.Run("returns error for invalid JSON", func(t *testing.T) {
-		raw := []byte(`{not valid}`)
-		_, err := inspector.Inspect(raw)
-		if err != ErrInvalidJSON {
-			t.Fatalf("expected ErrInvalidJSON, got %v", err)
-		}
-	})
-
-	t.Run("returns error for empty input", func(t *testing.T) {
-		_, err := inspector.Inspect([]byte{})
-		if err != ErrInvalidJSON {
-			t.Fatalf("expected ErrInvalidJSON, got %v", err)
-		}
-	})
+type JSONInspectorSuite struct {
+	suite.Suite
+	inspector Inspector
 }
 
-func TestJSONView_HasField(t *testing.T) {
+func (s *JSONInspectorSuite) SetupTest() {
+	s.inspector = JSONInspector()
+}
+
+func TestJSONInspectorSuite(t *testing.T) {
+	suite.Run(t, new(JSONInspectorSuite))
+}
+
+func (s *JSONInspectorSuite) TestReturnsViewForValidJSON() {
+	raw := []byte(`{"foo": "bar"}`)
+	view, err := s.inspector.Inspect(raw)
+
+	s.Require().NoError(err)
+	s.Assert().NotNil(view)
+}
+
+func (s *JSONInspectorSuite) TestReturnsErrorForInvalidJSON() {
+	raw := []byte(`{not valid}`)
+	_, err := s.inspector.Inspect(raw)
+
+	s.Assert().ErrorIs(err, ErrInvalidJSON)
+}
+
+func (s *JSONInspectorSuite) TestReturnsErrorForEmptyInput() {
+	_, err := s.inspector.Inspect([]byte{})
+
+	s.Assert().ErrorIs(err, ErrInvalidJSON)
+}
+
+type JSONViewHasFieldSuite struct {
+	suite.Suite
+	view View
+}
+
+func (s *JSONViewHasFieldSuite) SetupTest() {
 	inspector := JSONInspector()
 	raw := []byte(`{
 		"source": "my.app",
@@ -47,36 +58,44 @@ func TestJSONView_HasField(t *testing.T) {
 		}
 	}`)
 
-	view, err := inspector.Inspect(raw)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	var err error
+	s.view, err = inspector.Inspect(raw)
+	s.Require().NoError(err)
+}
 
-	tests := []struct {
+func TestJSONViewHasFieldSuite(t *testing.T) {
+	suite.Run(t, new(JSONViewHasFieldSuite))
+}
+
+func (s *JSONViewHasFieldSuite) TestHasField() {
+	tests := map[string]struct {
 		path   string
 		exists bool
 	}{
-		{"source", true},
-		{"detail-type", true},
-		{"detail", true},
-		{"detail.userId", true},
-		{"detail.nested.deep", true},
-		{"missing", false},
-		{"detail.missing", false},
-		{"detail.nested.missing", false},
+		"source":                {"source", true},
+		"detail-type":           {"detail-type", true},
+		"detail":                {"detail", true},
+		"detail.userId":         {"detail.userId", true},
+		"detail.nested.deep":    {"detail.nested.deep", true},
+		"missing":               {"missing", false},
+		"detail.missing":        {"detail.missing", false},
+		"detail.nested.missing": {"detail.nested.missing", false},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.path, func(t *testing.T) {
-			got := view.HasField(tt.path)
-			if got != tt.exists {
-				t.Errorf("HasField(%q) = %v, want %v", tt.path, got, tt.exists)
-			}
+	for name, tt := range tests {
+		s.Run(name, func() {
+			got := s.view.HasField(tt.path)
+			s.Assert().Equal(tt.exists, got)
 		})
 	}
 }
 
-func TestJSONView_GetString(t *testing.T) {
+type JSONViewGetStringSuite struct {
+	suite.Suite
+	view View
+}
+
+func (s *JSONViewGetStringSuite) SetupTest() {
 	inspector := JSONInspector()
 	raw := []byte(`{
 		"source": "my.app",
@@ -87,54 +106,53 @@ func TestJSONView_GetString(t *testing.T) {
 		}
 	}`)
 
-	view, err := inspector.Inspect(raw)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	t.Run("returns string value", func(t *testing.T) {
-		val, ok := view.GetString("source")
-		if !ok {
-			t.Fatal("expected ok=true")
-		}
-		if val != "my.app" {
-			t.Errorf("got %q, want %q", val, "my.app")
-		}
-	})
-
-	t.Run("returns nested string value", func(t *testing.T) {
-		val, ok := view.GetString("detail.userId")
-		if !ok {
-			t.Fatal("expected ok=true")
-		}
-		if val != "123" {
-			t.Errorf("got %q, want %q", val, "123")
-		}
-	})
-
-	t.Run("returns false for number", func(t *testing.T) {
-		_, ok := view.GetString("count")
-		if ok {
-			t.Error("expected ok=false for number field")
-		}
-	})
-
-	t.Run("returns false for boolean", func(t *testing.T) {
-		_, ok := view.GetString("active")
-		if ok {
-			t.Error("expected ok=false for boolean field")
-		}
-	})
-
-	t.Run("returns false for missing field", func(t *testing.T) {
-		_, ok := view.GetString("missing")
-		if ok {
-			t.Error("expected ok=false for missing field")
-		}
-	})
+	var err error
+	s.view, err = inspector.Inspect(raw)
+	s.Require().NoError(err)
 }
 
-func TestJSONView_GetBytes(t *testing.T) {
+func TestJSONViewGetStringSuite(t *testing.T) {
+	suite.Run(t, new(JSONViewGetStringSuite))
+}
+
+func (s *JSONViewGetStringSuite) TestReturnsStringValue() {
+	val, ok := s.view.GetString("source")
+
+	s.Require().True(ok)
+	s.Assert().Equal("my.app", val)
+}
+
+func (s *JSONViewGetStringSuite) TestReturnsNestedStringValue() {
+	val, ok := s.view.GetString("detail.userId")
+
+	s.Require().True(ok)
+	s.Assert().Equal("123", val)
+}
+
+func (s *JSONViewGetStringSuite) TestReturnsFalseForNumber() {
+	_, ok := s.view.GetString("count")
+
+	s.Assert().False(ok)
+}
+
+func (s *JSONViewGetStringSuite) TestReturnsFalseForBoolean() {
+	_, ok := s.view.GetString("active")
+
+	s.Assert().False(ok)
+}
+
+func (s *JSONViewGetStringSuite) TestReturnsFalseForMissingField() {
+	_, ok := s.view.GetString("missing")
+
+	s.Assert().False(ok)
+}
+
+type JSONViewGetBytesSuite struct {
+	suite.Suite
+	view View
+}
+
+func (s *JSONViewGetBytesSuite) SetupTest() {
 	inspector := JSONInspector()
 	raw := []byte(`{
 		"source": "my.app",
@@ -142,45 +160,38 @@ func TestJSONView_GetBytes(t *testing.T) {
 		"detail": {"userId": "123"}
 	}`)
 
-	view, err := inspector.Inspect(raw)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	var err error
+	s.view, err = inspector.Inspect(raw)
+	s.Require().NoError(err)
+}
 
-	t.Run("returns raw string with quotes", func(t *testing.T) {
-		val, ok := view.GetBytes("source")
-		if !ok {
-			t.Fatal("expected ok=true")
-		}
-		if string(val) != `"my.app"` {
-			t.Errorf("got %s, want %q", val, `"my.app"`)
-		}
-	})
+func TestJSONViewGetBytesSuite(t *testing.T) {
+	suite.Run(t, new(JSONViewGetBytesSuite))
+}
 
-	t.Run("returns raw number", func(t *testing.T) {
-		val, ok := view.GetBytes("count")
-		if !ok {
-			t.Fatal("expected ok=true")
-		}
-		if string(val) != "42" {
-			t.Errorf("got %s, want %q", val, "42")
-		}
-	})
+func (s *JSONViewGetBytesSuite) TestReturnsRawStringWithQuotes() {
+	val, ok := s.view.GetBytes("source")
 
-	t.Run("returns raw object", func(t *testing.T) {
-		val, ok := view.GetBytes("detail")
-		if !ok {
-			t.Fatal("expected ok=true")
-		}
-		if string(val) != `{"userId": "123"}` {
-			t.Errorf("got %s, want %q", val, `{"userId": "123"}`)
-		}
-	})
+	s.Require().True(ok)
+	s.Assert().Equal(`"my.app"`, string(val))
+}
 
-	t.Run("returns false for missing field", func(t *testing.T) {
-		_, ok := view.GetBytes("missing")
-		if ok {
-			t.Error("expected ok=false for missing field")
-		}
-	})
+func (s *JSONViewGetBytesSuite) TestReturnsRawNumber() {
+	val, ok := s.view.GetBytes("count")
+
+	s.Require().True(ok)
+	s.Assert().Equal("42", string(val))
+}
+
+func (s *JSONViewGetBytesSuite) TestReturnsRawObject() {
+	val, ok := s.view.GetBytes("detail")
+
+	s.Require().True(ok)
+	s.Assert().Equal(`{"userId": "123"}`, string(val))
+}
+
+func (s *JSONViewGetBytesSuite) TestReturnsFalseForMissingField() {
+	_, ok := s.view.GetBytes("missing")
+
+	s.Assert().False(ok)
 }
