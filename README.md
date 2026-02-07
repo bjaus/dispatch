@@ -9,11 +9,11 @@ A flexible message routing framework for event-driven Go applications.
 
 ## Features
 
-- **Multi-Source Routing** — Route messages from EventBridge, SNS, Step Functions, Kinesis, or custom formats through a single queue
+- **Multi-Source Routing** — Route messages from webhooks, message queues, or custom formats through a single processor
 - **Discriminator Pattern** — Cheap detection before expensive parsing for O(1) hot-path matching
 - **Typed Handlers** — Automatic JSON unmarshaling and validation with generics
 - **Pluggable Hooks** — Observability without coupling to specific logging or metrics systems
-- **Completion Callbacks** — Built-in support for Step Functions `SendTaskSuccess`/`SendTaskFailure`
+- **Completion Callbacks** — Built-in support for async acknowledgment patterns
 - **Format Agnostic** — Inspector/View abstraction supports JSON, protobuf, or custom formats
 - **Zero Allocation Matching** — Uses gjson for efficient JSON field lookups
 
@@ -127,8 +127,8 @@ By default, all sources use the JSON inspector. For mixed formats (e.g., JSON + 
 r := dispatch.New()
 
 // Default group uses JSON inspector
-r.AddSource(eventBridgeSource)
-r.AddSource(snsSource)
+r.AddSource(webhookSource)
+r.AddSource(apiSource)
 
 // Custom group for protobuf messages
 r.AddGroup(protoInspector, grpcSource, kafkaSource)
@@ -162,13 +162,14 @@ Add observability without coupling to specific systems:
 ```go
 r := dispatch.New(
     dispatch.WithOnParse(func(ctx context.Context, source, key string) context.Context {
-        return logx.WithCtx(ctx, slog.String("source", source))
+        slog.InfoContext(ctx, "parsing message", "source", source, "key", key)
+        return ctx
     }),
     dispatch.WithOnSuccess(func(ctx context.Context, source, key string, d time.Duration) {
-        metrics.Timing("dispatch.success", d, "source:"+source)
+        slog.InfoContext(ctx, "handler succeeded", "source", source, "key", key, "duration", d)
     }),
     dispatch.WithOnFailure(func(ctx context.Context, source, key string, err error, d time.Duration) {
-        metrics.Incr("dispatch.failure", "source:"+source)
+        slog.ErrorContext(ctx, "handler failed", "source", source, "key", key, "error", err, "duration", d)
     }),
 )
 ```
@@ -202,28 +203,26 @@ type OnSuccessHook interface {
 
 ## Completion Callbacks
 
-For transports that require acknowledgment (e.g., Step Functions):
+For transports that require explicit acknowledgment after processing:
 
 ```go
-func (s *sfnSource) Parse(raw []byte) (dispatch.Parsed, bool) {
-    // ... parse envelope with task token ...
+func (s *taskSource) Parse(raw []byte) (dispatch.Parsed, bool) {
+    var env struct {
+        TaskID  string          `json:"task_id"`
+        Type    string          `json:"type"`
+        Payload json.RawMessage `json:"payload"`
+    }
+    if err := json.Unmarshal(raw, &env); err != nil {
+        return dispatch.Parsed{}, false
+    }
     return dispatch.Parsed{
-        Key:     taskType,
-        Payload: payload,
+        Key:     env.Type,
+        Payload: env.Payload,
         Complete: func(ctx context.Context, err error) error {
             if err != nil {
-                _, e := s.sfn.SendTaskFailure(ctx, &sfn.SendTaskFailureInput{
-                    TaskToken: &token,
-                    Error:     aws.String("HandlerError"),
-                    Cause:     aws.String(err.Error()),
-                })
-                return e
+                return s.taskQueue.ReportFailure(ctx, env.TaskID, err)
             }
-            _, e := s.sfn.SendTaskSuccess(ctx, &sfn.SendTaskSuccessInput{
-                TaskToken: &token,
-                Output:    aws.String("{}"),
-            })
-            return e
+            return s.taskQueue.ReportSuccess(ctx, env.TaskID)
         },
     }, true
 }
@@ -240,12 +239,17 @@ type UserPayload struct {
 }
 
 func (p *UserPayload) Validate() error {
-    return validation.ValidateStruct(p,
-        validation.Field(&p.UserID, validation.Required),
-        validation.Field(&p.Email, validation.Required, is.Email),
-    )
+    if p.UserID == "" {
+        return errors.New("user_id is required")
+    }
+    if p.Email == "" {
+        return errors.New("email is required")
+    }
+    return nil
 }
 ```
+
+Works with any validation library (ozzo-validation, go-playground/validator, etc.) as long as your payload has a `Validate() error` method.
 
 ## Error Handling
 
@@ -269,36 +273,49 @@ r := dispatch.New(
 
 ## Integration Patterns
 
-### ECS Consumer with SQS Poller
+### HTTP Webhook Handler
 
 ```go
-type consumer struct {
-    router *dispatch.Router
-}
-
-func (c *consumer) ProcessMessage(ctx context.Context, msg []byte) error {
-    return c.router.Process(ctx, msg)
+func webhookHandler(w http.ResponseWriter, r *http.Request) {
+    body, _ := io.ReadAll(r.Body)
+    if err := router.Process(r.Context(), body); err != nil {
+        http.Error(w, err.Error(), http.StatusBadRequest)
+        return
+    }
+    w.WriteHeader(http.StatusOK)
 }
 ```
 
-### Lambda with SQS Events
+### Message Queue Consumer
 
 ```go
-func handler(ctx context.Context, event events.SQSEvent) error {
-    for _, record := range event.Records {
-        if err := router.Process(ctx, []byte(record.Body)); err != nil {
+func consume(ctx context.Context, queue MessageQueue) error {
+    for {
+        msg, err := queue.Receive(ctx)
+        if err != nil {
             return err
         }
+        if err := router.Process(ctx, msg.Body); err != nil {
+            msg.Nack() // retry later
+            continue
+        }
+        msg.Ack()
     }
-    return nil
 }
 ```
 
-### Lambda with Step Functions
+### Kafka Consumer
 
 ```go
-func handler(ctx context.Context, event json.RawMessage) error {
-    return router.Process(ctx, event)
+func (c *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+    for msg := range claim.Messages() {
+        if err := c.router.Process(session.Context(), msg.Value); err != nil {
+            slog.Error("processing failed", "error", err, "topic", msg.Topic)
+            continue
+        }
+        session.MarkMessage(msg, "")
+    }
+    return nil
 }
 ```
 
