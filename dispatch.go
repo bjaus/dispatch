@@ -61,15 +61,18 @@ func (f HandlerFunc[T]) Handle(ctx context.Context, payload T) error {
 //	    return dispatch.HasFields("type", "payload")
 //	}
 //
-//	func (s *mySource) Parse(raw []byte) (dispatch.Parsed, bool) {
+//	func (s *mySource) Parse(raw []byte) (dispatch.Parsed, error) {
 //	    var env struct {
 //	        Type    string          `json:"type"`
 //	        Payload json.RawMessage `json:"payload"`
 //	    }
-//	    if err := json.Unmarshal(raw, &env); err != nil || env.Type == "" {
-//	        return dispatch.Parsed{}, false
+//	    if err := json.Unmarshal(raw, &env); err != nil {
+//	        return dispatch.Parsed{}, err
 //	    }
-//	    return dispatch.Parsed{Key: env.Type, Payload: env.Payload}, true
+//	    if env.Type == "" {
+//	        return dispatch.Parsed{}, errors.New("missing type field")
+//	    }
+//	    return dispatch.Parsed{Key: env.Type, Payload: env.Payload}, nil
 //	}
 type Source interface {
 	// Name returns the source identifier for logging and metrics.
@@ -81,9 +84,9 @@ type Source interface {
 	Discriminator() Discriminator
 
 	// Parse attempts to parse raw bytes as this source's format.
-	// Returns the parsed result and true if successful, or false if this
-	// source does not recognize the message format.
-	Parse(raw []byte) (Parsed, bool)
+	// Returns the parsed result and nil if successful, or an error describing
+	// why parsing failed.
+	Parse(raw []byte) (Parsed, error)
 }
 
 // SourceFunc creates a Source from a name, discriminator, and parse function.
@@ -92,29 +95,33 @@ type Source interface {
 //	r.AddSource(dispatch.SourceFunc(
 //	    "legacy",
 //	    dispatch.HasFields("type", "payload"),
-//	    func(raw []byte) (dispatch.Parsed, bool) {
+//	    func(raw []byte) (dispatch.Parsed, error) {
 //	        // parse logic
 //	    },
 //	))
-func SourceFunc(name string, disc Discriminator, parse func([]byte) (Parsed, bool)) Source {
+func SourceFunc(name string, disc Discriminator, parse func([]byte) (Parsed, error)) Source {
 	return &sourceFunc{name: name, disc: disc, parse: parse}
 }
 
 type sourceFunc struct {
 	name  string
 	disc  Discriminator
-	parse func([]byte) (Parsed, bool)
+	parse func([]byte) (Parsed, error)
 }
 
-func (s *sourceFunc) Name() string                    { return s.name }
-func (s *sourceFunc) Discriminator() Discriminator    { return s.disc }
-func (s *sourceFunc) Parse(raw []byte) (Parsed, bool) { return s.parse(raw) }
+func (s *sourceFunc) Name() string                     { return s.name }
+func (s *sourceFunc) Discriminator() Discriminator     { return s.disc }
+func (s *sourceFunc) Parse(raw []byte) (Parsed, error) { return s.parse(raw) }
 
 // Parsed contains the result of source parsing.
 type Parsed struct {
 	// Key is the routing key used to find the handler.
 	// This is matched against keys passed to Register.
 	Key string
+
+	// Version is the schema version of the payload, if available.
+	// Sources should populate this for version-aware routing.
+	Version string
 
 	// Payload is the raw JSON to unmarshal into the handler's type.
 	Payload json.RawMessage

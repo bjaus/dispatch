@@ -3,6 +3,7 @@ package dispatch
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
@@ -173,10 +174,9 @@ func (r *Router) Process(ctx context.Context, raw []byte) error {
 	}
 
 	// Parse with matched source
-	parsed, ok := source.Parse(raw)
-	if !ok {
-		// Discriminator matched but parse failed - treat as no source
-		return r.handleNoSource(ctx, raw)
+	parsed, err := source.Parse(raw)
+	if err != nil {
+		return r.handleParseError(ctx, source, err)
 	}
 
 	sourceName := source.Name()
@@ -185,8 +185,8 @@ func (r *Router) Process(ctx context.Context, raw []byte) error {
 	ctx = r.callOnParse(ctx, source, sourceName, parsed.Key)
 
 	// Look up handler
-	handler, ok := r.handlers[parsed.Key]
-	if !ok {
+	handler, found := r.handlers[parsed.Key]
+	if !found {
 		return r.handleNoHandler(ctx, source, sourceName, parsed.Key)
 	}
 
@@ -195,14 +195,16 @@ func (r *Router) Process(ctx context.Context, raw []byte) error {
 
 	// Execute handler
 	start := time.Now()
-	err := handler(ctx, parsed.Payload)
+	err = handler(ctx, parsed.Payload)
 	duration := time.Since(start)
 
 	// Handle unmarshal and validation errors specially
-	if uerr, ok := err.(*unmarshalError); ok {
+	var uerr *unmarshalError
+	if errors.As(err, &uerr) {
 		return r.handleUnmarshalError(ctx, source, sourceName, parsed.Key, uerr.err, parsed.Complete)
 	}
-	if verr, ok := err.(*validationError); ok {
+	var verr *validationError
+	if errors.As(err, &verr) {
 		return r.handleValidationError(ctx, source, sourceName, parsed.Key, verr.err, parsed.Complete)
 	}
 
@@ -263,7 +265,7 @@ func (r *Router) match(raw []byte) Source {
 
 	// Try last successful source first (fast path)
 	if v := r.lastMatch.Load(); v != nil {
-		if lastMatch := v.(string); lastMatch != "" {
+		if lastMatch, ok := v.(string); ok && lastMatch != "" {
 			if src := r.trySource(cache, lastMatch); src != nil {
 				return src
 			}
@@ -388,6 +390,20 @@ func (r *Router) handleNoSource(ctx context.Context, raw []byte) error {
 		return nil
 	}
 	return fmt.Errorf("no source matched message")
+}
+
+// handleParseError handles the case when a source's Parse method returns an error.
+func (r *Router) handleParseError(ctx context.Context, source Source, parseErr error) error {
+	sourceName := source.Name()
+	for _, fn := range r.hooks.onParseError {
+		if err := fn(ctx, sourceName, parseErr); err != nil {
+			return err
+		}
+	}
+	if len(r.hooks.onParseError) > 0 {
+		return nil
+	}
+	return fmt.Errorf("parse failed for source %s: %w", sourceName, parseErr)
 }
 
 // handleNoHandler handles the case when no handler is registered.

@@ -35,15 +35,18 @@ func (s *sourceWithHooks) Discriminator() Discriminator {
 	return HasFields("type", "payload")
 }
 
-func (s *sourceWithHooks) Parse(raw []byte) (Parsed, bool) {
+func (s *sourceWithHooks) Parse(raw []byte) (Parsed, error) {
 	var env struct {
 		Type    string          `json:"type"`
 		Payload json.RawMessage `json:"payload"`
 	}
-	if err := json.Unmarshal(raw, &env); err != nil || env.Type == "" {
-		return Parsed{}, false
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return Parsed{}, err
 	}
-	return Parsed{Key: env.Type, Payload: env.Payload}, true
+	if env.Type == "" {
+		return Parsed{}, errors.New("missing type")
+	}
+	return Parsed{Key: env.Type, Payload: env.Payload}, nil
 }
 
 func (s *sourceWithHooks) OnParse(ctx context.Context, key string) context.Context {

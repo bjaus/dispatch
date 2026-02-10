@@ -38,18 +38,18 @@ func (s *testSource) Discriminator() Discriminator {
 	return HasFields("type", "payload")
 }
 
-func (s *testSource) Parse(raw []byte) (Parsed, bool) {
+func (s *testSource) Parse(raw []byte) (Parsed, error) {
 	var env struct {
 		Type    string          `json:"type"`
 		Payload json.RawMessage `json:"payload"`
 	}
 	if err := json.Unmarshal(raw, &env); err != nil {
-		return Parsed{}, false
+		return Parsed{}, err
 	}
 	if env.Type == "" {
-		return Parsed{}, false
+		return Parsed{}, errors.New("missing type field")
 	}
-	return Parsed{Key: env.Type, Payload: env.Payload}, true
+	return Parsed{Key: env.Type, Payload: env.Payload}, nil
 }
 
 // mockInspector is a test inspector that can be configured to fail.
@@ -148,8 +148,8 @@ func (s *RouterSuite) TestProcess_TriesSourcesInOrder() {
 	r := New()
 
 	// First source doesn't match JSON format
-	r.AddSource(SourceFunc("first", HasFields("nonexistent"), func(raw []byte) (Parsed, bool) {
-		return Parsed{}, false
+	r.AddSource(SourceFunc("first", HasFields("nonexistent"), func(raw []byte) (Parsed, error) {
+		return Parsed{}, errors.New("no match")
 	}))
 
 	// Second source matches
@@ -199,15 +199,18 @@ func (s *GroupsSuite) TestDefaultGroupUsesDefaultInspector() {
 
 func (s *GroupsSuite) TestCustomGroupWithCustomInspector() {
 	customInspector := JSONInspector()
-	customSource := SourceFunc("custom", HasFields("event", "data"), func(raw []byte) (Parsed, bool) {
+	customSource := SourceFunc("custom", HasFields("event", "data"), func(raw []byte) (Parsed, error) {
 		var env struct {
 			Event string          `json:"event"`
 			Data  json.RawMessage `json:"data"`
 		}
-		if err := json.Unmarshal(raw, &env); err != nil || env.Event == "" {
-			return Parsed{}, false
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return Parsed{}, err
 		}
-		return Parsed{Key: env.Event, Payload: env.Data}, true
+		if env.Event == "" {
+			return Parsed{}, errors.New("missing event field")
+		}
+		return Parsed{Key: env.Event, Payload: env.Data}, nil
 	})
 
 	s.router.AddGroup(customInspector, customSource)
@@ -226,29 +229,35 @@ func (s *GroupsSuite) TestDefaultGroupCheckedBeforeCustomGroups() {
 	var matchedSource string
 
 	// Default group source
-	s.router.AddSource(SourceFunc("default", HasFields("type"), func(raw []byte) (Parsed, bool) {
+	s.router.AddSource(SourceFunc("default", HasFields("type"), func(raw []byte) (Parsed, error) {
 		matchedSource = "default"
 		var env struct {
 			Type    string          `json:"type"`
 			Payload json.RawMessage `json:"payload"`
 		}
-		if err := json.Unmarshal(raw, &env); err != nil || env.Type == "" {
-			return Parsed{}, false
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return Parsed{}, err
 		}
-		return Parsed{Key: env.Type, Payload: env.Payload}, true
+		if env.Type == "" {
+			return Parsed{}, errors.New("missing type")
+		}
+		return Parsed{Key: env.Type, Payload: env.Payload}, nil
 	}))
 
 	// Custom group source (also matches "type" field)
-	customSource := SourceFunc("custom", HasFields("type"), func(raw []byte) (Parsed, bool) {
+	customSource := SourceFunc("custom", HasFields("type"), func(raw []byte) (Parsed, error) {
 		matchedSource = "custom"
 		var env struct {
 			Type    string          `json:"type"`
 			Payload json.RawMessage `json:"payload"`
 		}
-		if err := json.Unmarshal(raw, &env); err != nil || env.Type == "" {
-			return Parsed{}, false
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return Parsed{}, err
 		}
-		return Parsed{Key: env.Type, Payload: env.Payload}, true
+		if env.Type == "" {
+			return Parsed{}, errors.New("missing type")
+		}
+		return Parsed{Key: env.Type, Payload: env.Payload}, nil
 	})
 	s.router.AddGroup(JSONInspector(), customSource)
 
@@ -287,31 +296,37 @@ func (s *AdaptiveOrderingSuite) TestLastMatchedSourceTriedFirst() {
 	r := New()
 
 	// First source - matches "first" type
-	r.AddSource(SourceFunc("first-source", HasFields("first"), func(raw []byte) (Parsed, bool) {
+	r.AddSource(SourceFunc("first-source", HasFields("first"), func(raw []byte) (Parsed, error) {
 		matchOrder = append(matchOrder, "first-source")
 		var env struct {
 			First   bool            `json:"first"`
 			Type    string          `json:"type"`
 			Payload json.RawMessage `json:"payload"`
 		}
-		if err := json.Unmarshal(raw, &env); err != nil || !env.First {
-			return Parsed{}, false
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return Parsed{}, err
 		}
-		return Parsed{Key: env.Type, Payload: env.Payload}, true
+		if !env.First {
+			return Parsed{}, errors.New("not first")
+		}
+		return Parsed{Key: env.Type, Payload: env.Payload}, nil
 	}))
 
 	// Second source - matches "second" type
-	r.AddSource(SourceFunc("second-source", HasFields("second"), func(raw []byte) (Parsed, bool) {
+	r.AddSource(SourceFunc("second-source", HasFields("second"), func(raw []byte) (Parsed, error) {
 		matchOrder = append(matchOrder, "second-source")
 		var env struct {
 			Second  bool            `json:"second"`
 			Type    string          `json:"type"`
 			Payload json.RawMessage `json:"payload"`
 		}
-		if err := json.Unmarshal(raw, &env); err != nil || !env.Second {
-			return Parsed{}, false
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return Parsed{}, err
 		}
-		return Parsed{Key: env.Type, Payload: env.Payload}, true
+		if !env.Second {
+			return Parsed{}, errors.New("not second")
+		}
+		return Parsed{Key: env.Type, Payload: env.Payload}, nil
 	}))
 
 	Register(r, "test", &testHandler{})
@@ -336,28 +351,34 @@ func (s *AdaptiveOrderingSuite) TestLastMatchedSourceTriedFirst() {
 func (s *AdaptiveOrderingSuite) TestFallsBackToFullSearchWhenLastMatchFails() {
 	r := New()
 
-	r.AddSource(SourceFunc("first-source", HasFields("first"), func(raw []byte) (Parsed, bool) {
+	r.AddSource(SourceFunc("first-source", HasFields("first"), func(raw []byte) (Parsed, error) {
 		var env struct {
 			First   bool            `json:"first"`
 			Type    string          `json:"type"`
 			Payload json.RawMessage `json:"payload"`
 		}
-		if err := json.Unmarshal(raw, &env); err != nil || !env.First {
-			return Parsed{}, false
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return Parsed{}, err
 		}
-		return Parsed{Key: env.Type, Payload: env.Payload}, true
+		if !env.First {
+			return Parsed{}, errors.New("not first")
+		}
+		return Parsed{Key: env.Type, Payload: env.Payload}, nil
 	}))
 
-	r.AddSource(SourceFunc("second-source", HasFields("second"), func(raw []byte) (Parsed, bool) {
+	r.AddSource(SourceFunc("second-source", HasFields("second"), func(raw []byte) (Parsed, error) {
 		var env struct {
 			Second  bool            `json:"second"`
 			Type    string          `json:"type"`
 			Payload json.RawMessage `json:"payload"`
 		}
-		if err := json.Unmarshal(raw, &env); err != nil || !env.Second {
-			return Parsed{}, false
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return Parsed{}, err
 		}
-		return Parsed{Key: env.Type, Payload: env.Payload}, true
+		if !env.Second {
+			return Parsed{}, errors.New("not second")
+		}
+		return Parsed{Key: env.Type, Payload: env.Payload}, nil
 	}))
 
 	Register(r, "test", &testHandler{})
@@ -517,13 +538,16 @@ func TestCompletionSuite(t *testing.T) {
 }
 
 func (s *CompletionSuite) makeSourceWithCompletion(completeCalled *bool, completeErr *error) Source {
-	return SourceFunc("completion", HasFields("type", "payload"), func(raw []byte) (Parsed, bool) {
+	return SourceFunc("completion", HasFields("type", "payload"), func(raw []byte) (Parsed, error) {
 		var env struct {
 			Type    string          `json:"type"`
 			Payload json.RawMessage `json:"payload"`
 		}
-		if json.Unmarshal(raw, &env) != nil || env.Type == "" {
-			return Parsed{}, false
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return Parsed{}, err
+		}
+		if env.Type == "" {
+			return Parsed{}, errors.New("missing type")
 		}
 		return Parsed{
 			Key:     env.Type,
@@ -533,7 +557,7 @@ func (s *CompletionSuite) makeSourceWithCompletion(completeCalled *bool, complet
 				*completeErr = err
 				return nil
 			},
-		}, true
+		}, nil
 	})
 }
 
@@ -752,13 +776,16 @@ func (s *ValidationSuite) TestValidationErrorWithCompletionCallback() {
 	var completeErr error
 	var completeCalled bool
 
-	source := SourceFunc("completion", HasFields("type", "payload"), func(raw []byte) (Parsed, bool) {
+	source := SourceFunc("completion", HasFields("type", "payload"), func(raw []byte) (Parsed, error) {
 		var env struct {
 			Type    string          `json:"type"`
 			Payload json.RawMessage `json:"payload"`
 		}
-		if json.Unmarshal(raw, &env) != nil || env.Type == "" {
-			return Parsed{}, false
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return Parsed{}, err
+		}
+		if env.Type == "" {
+			return Parsed{}, errors.New("missing type")
 		}
 		return Parsed{
 			Key:     env.Type,
@@ -768,7 +795,7 @@ func (s *ValidationSuite) TestValidationErrorWithCompletionCallback() {
 				completeErr = err
 				return nil
 			},
-		}, true
+		}, nil
 	})
 
 	r := New()
@@ -814,16 +841,19 @@ func TestTrySourceInGroupsSuite(t *testing.T) {
 func (s *TrySourceInGroupsSuite) TestAdaptiveOrderingWorksWithCustomGroups() {
 	r := New()
 
-	customSource := SourceFunc("custom-group-source", HasFields("custom"), func(raw []byte) (Parsed, bool) {
+	customSource := SourceFunc("custom-group-source", HasFields("custom"), func(raw []byte) (Parsed, error) {
 		var env struct {
 			Custom  bool            `json:"custom"`
 			Type    string          `json:"type"`
 			Payload json.RawMessage `json:"payload"`
 		}
-		if json.Unmarshal(raw, &env) != nil || !env.Custom {
-			return Parsed{}, false
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return Parsed{}, err
 		}
-		return Parsed{Key: env.Type, Payload: env.Payload}, true
+		if !env.Custom {
+			return Parsed{}, errors.New("not custom")
+		}
+		return Parsed{Key: env.Type, Payload: env.Payload}, nil
 	})
 
 	r.AddGroup(JSONInspector(), customSource)
@@ -844,8 +874,8 @@ func (s *TrySourceInGroupsSuite) TestTrySourceHandlesInspectorErrorInCustomGroup
 	r.AddSource(&testSource{name: "default"})
 
 	failingInspector := &mockInspector{err: ErrInvalidJSON}
-	customSource := SourceFunc("custom", HasFields("custom"), func(raw []byte) (Parsed, bool) {
-		return Parsed{Key: "test", Payload: []byte(`{}`)}, true
+	customSource := SourceFunc("custom", HasFields("custom"), func(raw []byte) (Parsed, error) {
+		return Parsed{Key: "test", Payload: []byte(`{}`)}, nil
 	})
 	r.AddGroup(failingInspector, customSource)
 
@@ -873,13 +903,16 @@ func (s *UnmarshalErrorSuite) TestUnmarshalErrorCallsCompletionCallback() {
 	var completeErr error
 	var completeCalled bool
 
-	source := SourceFunc("completion", HasFields("type", "payload"), func(raw []byte) (Parsed, bool) {
+	source := SourceFunc("completion", HasFields("type", "payload"), func(raw []byte) (Parsed, error) {
 		var env struct {
 			Type    string          `json:"type"`
 			Payload json.RawMessage `json:"payload"`
 		}
-		if json.Unmarshal(raw, &env) != nil || env.Type == "" {
-			return Parsed{}, false
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return Parsed{}, err
+		}
+		if env.Type == "" {
+			return Parsed{}, errors.New("missing type")
 		}
 		return Parsed{
 			Key:     env.Type,
@@ -889,7 +922,7 @@ func (s *UnmarshalErrorSuite) TestUnmarshalErrorCallsCompletionCallback() {
 				completeErr = err
 				return nil
 			},
-		}, true
+		}, nil
 	})
 
 	r := New()
@@ -958,8 +991,8 @@ func TestRouter_OnUnmarshalErrorReturnsCustomError(t *testing.T) {
 }
 
 func TestRouter_SourceParseFailsAfterDiscriminatorMatch(t *testing.T) {
-	flakySource := SourceFunc("flaky", HasFields("type"), func(raw []byte) (Parsed, bool) {
-		return Parsed{}, false
+	flakySource := SourceFunc("flaky", HasFields("type"), func(raw []byte) (Parsed, error) {
+		return Parsed{}, errors.New("parse failed")
 	})
 
 	r := New()
@@ -996,19 +1029,19 @@ func TestRouter_SourceValidationErrorHookReturnsError(t *testing.T) {
 func TestRouter_CustomGroupMatchAll(t *testing.T) {
 	r := New()
 
-	r.AddSource(SourceFunc("default", HasFields("default_field"), func(raw []byte) (Parsed, bool) {
-		return Parsed{}, false
+	r.AddSource(SourceFunc("default", HasFields("default_field"), func(raw []byte) (Parsed, error) {
+		return Parsed{}, errors.New("no match")
 	}))
 
-	customSource := SourceFunc("custom", HasFields("custom_field"), func(raw []byte) (Parsed, bool) {
+	customSource := SourceFunc("custom", HasFields("custom_field"), func(raw []byte) (Parsed, error) {
 		var env struct {
 			Type    string          `json:"type"`
 			Payload json.RawMessage `json:"payload"`
 		}
-		if json.Unmarshal(raw, &env) != nil {
-			return Parsed{}, false
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return Parsed{}, err
 		}
-		return Parsed{Key: env.Type, Payload: env.Payload}, true
+		return Parsed{Key: env.Type, Payload: env.Payload}, nil
 	})
 	r.AddGroup(JSONInspector(), customSource)
 
@@ -1028,16 +1061,19 @@ func TestRouter_CustomGroupMatchAll(t *testing.T) {
 func TestRouter_TrySourceCustomGroupMatch(t *testing.T) {
 	r := New()
 
-	customSource := SourceFunc("custom-src", HasFields("custom"), func(raw []byte) (Parsed, bool) {
+	customSource := SourceFunc("custom-src", HasFields("custom"), func(raw []byte) (Parsed, error) {
 		var env struct {
 			Custom  bool            `json:"custom"`
 			Type    string          `json:"type"`
 			Payload json.RawMessage `json:"payload"`
 		}
-		if json.Unmarshal(raw, &env) != nil || !env.Custom {
-			return Parsed{}, false
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return Parsed{}, err
 		}
-		return Parsed{Key: env.Type, Payload: env.Payload}, true
+		if !env.Custom {
+			return Parsed{}, errors.New("not custom")
+		}
+		return Parsed{Key: env.Type, Payload: env.Payload}, nil
 	})
 	r.AddGroup(JSONInspector(), customSource)
 
@@ -1057,8 +1093,8 @@ func TestRouter_MatchAllCustomGroupInspectorError(t *testing.T) {
 	r := New()
 
 	failingInspector := &mockInspector{err: ErrInvalidJSON}
-	customSource := SourceFunc("custom", HasFields("custom"), func(raw []byte) (Parsed, bool) {
-		return Parsed{Key: "test", Payload: []byte(`{}`)}, true
+	customSource := SourceFunc("custom", HasFields("custom"), func(raw []byte) (Parsed, error) {
+		return Parsed{Key: "test", Payload: []byte(`{}`)}, nil
 	})
 	r.AddGroup(failingInspector, customSource)
 
@@ -1071,16 +1107,19 @@ func TestRouter_MatchAllCustomGroupInspectorError(t *testing.T) {
 func TestRouter_TrySourceFindsInCustomGroupDirectly(t *testing.T) {
 	r := New()
 
-	customSource := SourceFunc("only-custom", HasFields("x"), func(raw []byte) (Parsed, bool) {
+	customSource := SourceFunc("only-custom", HasFields("x"), func(raw []byte) (Parsed, error) {
 		var env struct {
 			X       bool            `json:"x"`
 			Type    string          `json:"type"`
 			Payload json.RawMessage `json:"payload"`
 		}
-		if json.Unmarshal(raw, &env) != nil || !env.X {
-			return Parsed{}, false
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return Parsed{}, err
 		}
-		return Parsed{Key: env.Type, Payload: env.Payload}, true
+		if !env.X {
+			return Parsed{}, errors.New("not x")
+		}
+		return Parsed{Key: env.Type, Payload: env.Payload}, nil
 	})
 	r.AddGroup(JSONInspector(), customSource)
 
@@ -1100,29 +1139,35 @@ func TestRouter_TrySourceInspectorFailsInCustomGroup(t *testing.T) {
 
 	conditionalInsp := &conditionalInspector{failAfter: 1}
 
-	customSource := SourceFunc("conditional-src", HasFields("c"), func(raw []byte) (Parsed, bool) {
+	customSource := SourceFunc("conditional-src", HasFields("c"), func(raw []byte) (Parsed, error) {
 		var env struct {
 			C       bool            `json:"c"`
 			Type    string          `json:"type"`
 			Payload json.RawMessage `json:"payload"`
 		}
-		if json.Unmarshal(raw, &env) != nil || !env.C {
-			return Parsed{}, false
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return Parsed{}, err
 		}
-		return Parsed{Key: env.Type, Payload: env.Payload}, true
+		if !env.C {
+			return Parsed{}, errors.New("not c")
+		}
+		return Parsed{Key: env.Type, Payload: env.Payload}, nil
 	})
 	r.AddGroup(conditionalInsp, customSource)
 
-	defaultSource := SourceFunc("default-src", HasFields("d"), func(raw []byte) (Parsed, bool) {
+	defaultSource := SourceFunc("default-src", HasFields("d"), func(raw []byte) (Parsed, error) {
 		var env struct {
 			D       bool            `json:"d"`
 			Type    string          `json:"type"`
 			Payload json.RawMessage `json:"payload"`
 		}
-		if json.Unmarshal(raw, &env) != nil || !env.D {
-			return Parsed{}, false
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return Parsed{}, err
 		}
-		return Parsed{Key: env.Type, Payload: env.Payload}, true
+		if !env.D {
+			return Parsed{}, errors.New("not d")
+		}
+		return Parsed{Key: env.Type, Payload: env.Payload}, nil
 	})
 	r.AddSource(defaultSource)
 
@@ -1165,15 +1210,18 @@ func (s *ViewCachingSuite) TestInspectorCalledOnceWhenTrySourceSucceeds() {
 
 	r := New(WithInspector(inspector))
 
-	source := SourceFunc("test-source", HasFields("type"), func(raw []byte) (Parsed, bool) {
+	source := SourceFunc("test-source", HasFields("type"), func(raw []byte) (Parsed, error) {
 		var env struct {
 			Type    string          `json:"type"`
 			Payload json.RawMessage `json:"payload"`
 		}
-		if json.Unmarshal(raw, &env) != nil || env.Type == "" {
-			return Parsed{}, false
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return Parsed{}, err
 		}
-		return Parsed{Key: env.Type, Payload: env.Payload}, true
+		if env.Type == "" {
+			return Parsed{}, errors.New("missing type")
+		}
+		return Parsed{Key: env.Type, Payload: env.Payload}, nil
 	})
 	r.AddSource(source)
 	Register(r, "test", &testHandler{})
@@ -1193,29 +1241,35 @@ func (s *ViewCachingSuite) TestInspectorCalledOnceWhenTrySourceFailsAndMatchAllS
 	r := New(WithInspector(inspector))
 
 	// Source A - matches "a" field
-	sourceA := SourceFunc("source-a", HasFields("a"), func(raw []byte) (Parsed, bool) {
+	sourceA := SourceFunc("source-a", HasFields("a"), func(raw []byte) (Parsed, error) {
 		var env struct {
 			A       bool            `json:"a"`
 			Type    string          `json:"type"`
 			Payload json.RawMessage `json:"payload"`
 		}
-		if json.Unmarshal(raw, &env) != nil || !env.A {
-			return Parsed{}, false
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return Parsed{}, err
 		}
-		return Parsed{Key: env.Type, Payload: env.Payload}, true
+		if !env.A {
+			return Parsed{}, errors.New("not a")
+		}
+		return Parsed{Key: env.Type, Payload: env.Payload}, nil
 	})
 
 	// Source B - matches "b" field
-	sourceB := SourceFunc("source-b", HasFields("b"), func(raw []byte) (Parsed, bool) {
+	sourceB := SourceFunc("source-b", HasFields("b"), func(raw []byte) (Parsed, error) {
 		var env struct {
 			B       bool            `json:"b"`
 			Type    string          `json:"type"`
 			Payload json.RawMessage `json:"payload"`
 		}
-		if json.Unmarshal(raw, &env) != nil || !env.B {
-			return Parsed{}, false
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return Parsed{}, err
 		}
-		return Parsed{Key: env.Type, Payload: env.Payload}, true
+		if !env.B {
+			return Parsed{}, errors.New("not b")
+		}
+		return Parsed{Key: env.Type, Payload: env.Payload}, nil
 	})
 
 	r.AddSource(sourceA)
@@ -1247,27 +1301,27 @@ func (s *ViewCachingSuite) TestInspectorCalledOncePerGroupWithMultipleGroups() {
 	r := New(WithInspector(defaultInspector))
 
 	// Default source - won't match
-	defaultSource := SourceFunc("default", HasFields("default_field"), func(raw []byte) (Parsed, bool) {
-		return Parsed{}, false
+	defaultSource := SourceFunc("default", HasFields("default_field"), func(raw []byte) (Parsed, error) {
+		return Parsed{}, errors.New("no match")
 	})
 	r.AddSource(defaultSource)
 
 	// Group 1 source - won't match
-	group1Source := SourceFunc("group1", HasFields("group1_field"), func(raw []byte) (Parsed, bool) {
-		return Parsed{}, false
+	group1Source := SourceFunc("group1", HasFields("group1_field"), func(raw []byte) (Parsed, error) {
+		return Parsed{}, errors.New("no match")
 	})
 	r.AddGroup(group1Inspector, group1Source)
 
 	// Group 2 source - will match
-	group2Source := SourceFunc("group2", HasFields("group2_field"), func(raw []byte) (Parsed, bool) {
+	group2Source := SourceFunc("group2", HasFields("group2_field"), func(raw []byte) (Parsed, error) {
 		var env struct {
 			Type    string          `json:"type"`
 			Payload json.RawMessage `json:"payload"`
 		}
-		if json.Unmarshal(raw, &env) != nil {
-			return Parsed{}, false
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return Parsed{}, err
 		}
-		return Parsed{Key: env.Type, Payload: env.Payload}, true
+		return Parsed{Key: env.Type, Payload: env.Payload}, nil
 	})
 	r.AddGroup(group2Inspector, group2Source)
 
@@ -1288,21 +1342,21 @@ func (s *ViewCachingSuite) TestSameInspectorSharedAcrossGroupsCalledOnce() {
 	r := New(WithInspector(sharedInspector))
 
 	// Default source - won't match
-	defaultSource := SourceFunc("default", HasFields("default_field"), func(raw []byte) (Parsed, bool) {
-		return Parsed{}, false
+	defaultSource := SourceFunc("default", HasFields("default_field"), func(raw []byte) (Parsed, error) {
+		return Parsed{}, errors.New("no match")
 	})
 	r.AddSource(defaultSource)
 
 	// Custom group using the SAME inspector
-	customSource := SourceFunc("custom", HasFields("custom_field"), func(raw []byte) (Parsed, bool) {
+	customSource := SourceFunc("custom", HasFields("custom_field"), func(raw []byte) (Parsed, error) {
 		var env struct {
 			Type    string          `json:"type"`
 			Payload json.RawMessage `json:"payload"`
 		}
-		if json.Unmarshal(raw, &env) != nil {
-			return Parsed{}, false
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return Parsed{}, err
 		}
-		return Parsed{Key: env.Type, Payload: env.Payload}, true
+		return Parsed{Key: env.Type, Payload: env.Payload}, nil
 	})
 	r.AddGroup(sharedInspector, customSource)
 
@@ -1323,21 +1377,21 @@ func (s *ViewCachingSuite) TestViewCacheHandlesInspectorError() {
 	r := New(WithInspector(failingInspector))
 
 	// Default source with failing inspector
-	defaultSource := SourceFunc("default", HasFields("x"), func(raw []byte) (Parsed, bool) {
-		return Parsed{}, false
+	defaultSource := SourceFunc("default", HasFields("x"), func(raw []byte) (Parsed, error) {
+		return Parsed{}, errors.New("no match")
 	})
 	r.AddSource(defaultSource)
 
 	// Custom group with working inspector
-	customSource := SourceFunc("custom", HasFields("type"), func(raw []byte) (Parsed, bool) {
+	customSource := SourceFunc("custom", HasFields("type"), func(raw []byte) (Parsed, error) {
 		var env struct {
 			Type    string          `json:"type"`
 			Payload json.RawMessage `json:"payload"`
 		}
-		if json.Unmarshal(raw, &env) != nil {
-			return Parsed{}, false
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return Parsed{}, err
 		}
-		return Parsed{Key: env.Type, Payload: env.Payload}, true
+		return Parsed{Key: env.Type, Payload: env.Payload}, nil
 	})
 	r.AddGroup(workingInspector, customSource)
 
@@ -1358,23 +1412,23 @@ func (s *ViewCachingSuite) TestViewCacheCachesFailureResult() {
 	r := New(WithInspector(failingInspector))
 
 	// Add multiple sources to default group to force multiple discriminator checks
-	r.AddSource(SourceFunc("src1", HasFields("a"), func(raw []byte) (Parsed, bool) {
-		return Parsed{}, false
+	r.AddSource(SourceFunc("src1", HasFields("a"), func(raw []byte) (Parsed, error) {
+		return Parsed{}, errors.New("no match")
 	}))
-	r.AddSource(SourceFunc("src2", HasFields("b"), func(raw []byte) (Parsed, bool) {
-		return Parsed{}, false
+	r.AddSource(SourceFunc("src2", HasFields("b"), func(raw []byte) (Parsed, error) {
+		return Parsed{}, errors.New("no match")
 	}))
 
 	// Custom group with working inspector
-	customSource := SourceFunc("custom", HasFields("type"), func(raw []byte) (Parsed, bool) {
+	customSource := SourceFunc("custom", HasFields("type"), func(raw []byte) (Parsed, error) {
 		var env struct {
 			Type    string          `json:"type"`
 			Payload json.RawMessage `json:"payload"`
 		}
-		if json.Unmarshal(raw, &env) != nil {
-			return Parsed{}, false
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return Parsed{}, err
 		}
-		return Parsed{Key: env.Type, Payload: env.Payload}, true
+		return Parsed{Key: env.Type, Payload: env.Payload}, nil
 	})
 	r.AddGroup(workingInspector, customSource)
 

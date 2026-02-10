@@ -23,6 +23,10 @@ type OnFailureFunc func(ctx context.Context, source, key string, err error, dura
 // Return nil to skip the message, return an error to fail.
 type OnNoSourceFunc func(ctx context.Context, raw []byte) error
 
+// OnParseErrorFunc is called when a source's Parse method returns an error.
+// Return nil to skip the message, return an error to fail.
+type OnParseErrorFunc func(ctx context.Context, source string, err error) error
+
 // OnNoHandlerFunc is called when no handler is registered for the routing key.
 // Return nil to skip, return an error to fail.
 type OnNoHandlerFunc func(ctx context.Context, source, key string) error
@@ -42,6 +46,7 @@ type hooks struct {
 	onSuccess         []OnSuccessFunc
 	onFailure         []OnFailureFunc
 	onNoSource        []OnNoSourceFunc
+	onParseError      []OnParseErrorFunc
 	onNoHandler       []OnNoHandlerFunc
 	onUnmarshalError  []OnUnmarshalErrorFunc
 	onValidationError []OnValidationErrorFunc
@@ -120,6 +125,22 @@ func WithOnFailure(fn OnFailureFunc) Option {
 func WithOnNoSource(fn OnNoSourceFunc) Option {
 	return func(r *Router) {
 		r.hooks.onNoSource = append(r.hooks.onNoSource, fn)
+	}
+}
+
+// WithOnParseError adds a hook called when a source's Parse method returns an error.
+// Return nil to skip, return an error to fail.
+// Multiple hooks are called in order; first error wins.
+//
+// Example:
+//
+//	dispatch.WithOnParseError(func(ctx context.Context, source string, err error) error {
+//	    logger.Error(ctx, "parse failed", "source", source, "error", err)
+//	    return nil // skip bad messages
+//	})
+func WithOnParseError(fn OnParseErrorFunc) Option {
+	return func(r *Router) {
+		r.hooks.onParseError = append(r.hooks.onParseError, fn)
 	}
 }
 

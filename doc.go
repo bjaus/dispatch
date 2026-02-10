@@ -98,7 +98,7 @@
 //	type Source interface {
 //	    Name() string
 //	    Discriminator() Discriminator
-//	    Parse(raw []byte) (Parsed, bool)
+//	    Parse(raw []byte) (Parsed, error)
 //	}
 //
 // Sources are matched using their Discriminator, then parsed in registration order.
@@ -106,6 +106,7 @@
 //
 // The Parsed struct contains:
 //   - Key: routing key to match against registered handlers
+//   - Version: optional schema version for version-aware routing
 //   - Payload: raw JSON to unmarshal into the handler's type
 //   - Complete: optional callback for completion semantics (e.g., Step Functions)
 //
@@ -119,18 +120,21 @@
 //	    return dispatch.HasFields("type", "payload")
 //	}
 //
-//	func (s *mySource) Parse(raw []byte) (dispatch.Parsed, bool) {
+//	func (s *mySource) Parse(raw []byte) (dispatch.Parsed, error) {
 //	    var env struct {
 //	        Type    string          `json:"type"`
 //	        Payload json.RawMessage `json:"payload"`
 //	    }
-//	    if err := json.Unmarshal(raw, &env); err != nil || env.Type == "" {
-//	        return dispatch.Parsed{}, false
+//	    if err := json.Unmarshal(raw, &env); err != nil {
+//	        return dispatch.Parsed{}, err
+//	    }
+//	    if env.Type == "" {
+//	        return dispatch.Parsed{}, errors.New("missing type field")
 //	    }
 //	    return dispatch.Parsed{
 //	        Key:     env.Type,
 //	        Payload: env.Payload,
-//	    }, true
+//	    }, nil
 //	}
 //
 // Use SourceFunc for simple sources without a struct:
@@ -179,6 +183,7 @@
 //   - WithOnSuccess: Called after handler succeeds
 //   - WithOnFailure: Called after handler fails
 //   - WithOnNoSource: Called when no source matches
+//   - WithOnParseError: Called when source's Parse returns an error
 //   - WithOnNoHandler: Called when no handler is registered
 //   - WithOnUnmarshalError: Called on JSON unmarshal errors
 //   - WithOnValidationError: Called on validation errors

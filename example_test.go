@@ -33,18 +33,21 @@ func (s *simpleSource) Discriminator() dispatch.Discriminator {
 	return dispatch.HasFields("type", "payload")
 }
 
-func (s *simpleSource) Parse(raw []byte) (dispatch.Parsed, bool) {
+func (s *simpleSource) Parse(raw []byte) (dispatch.Parsed, error) {
 	var env struct {
 		Type    string          `json:"type"`
 		Payload json.RawMessage `json:"payload"`
 	}
-	if err := json.Unmarshal(raw, &env); err != nil || env.Type == "" {
-		return dispatch.Parsed{}, false
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return dispatch.Parsed{}, err
+	}
+	if env.Type == "" {
+		return dispatch.Parsed{}, fmt.Errorf("missing type field")
 	}
 	return dispatch.Parsed{
 		Key:     env.Type,
 		Payload: env.Payload,
-	}, true
+	}, nil
 }
 
 func Example() {
@@ -95,15 +98,18 @@ func Example_sourceFunc() {
 	r := dispatch.New()
 
 	// Use SourceFunc for simple sources
-	r.AddSource(dispatch.SourceFunc("custom", dispatch.HasFields("event", "data"), func(raw []byte) (dispatch.Parsed, bool) {
+	r.AddSource(dispatch.SourceFunc("custom", dispatch.HasFields("event", "data"), func(raw []byte) (dispatch.Parsed, error) {
 		var env struct {
 			Event string          `json:"event"`
 			Data  json.RawMessage `json:"data"`
 		}
-		if err := json.Unmarshal(raw, &env); err != nil || env.Event == "" {
-			return dispatch.Parsed{}, false
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return dispatch.Parsed{}, err
 		}
-		return dispatch.Parsed{Key: env.Event, Payload: env.Data}, true
+		if env.Event == "" {
+			return dispatch.Parsed{}, fmt.Errorf("missing event field")
+		}
+		return dispatch.Parsed{Key: env.Event, Payload: env.Data}, nil
 	}))
 
 	dispatch.RegisterFunc(r, "hello", func(ctx context.Context, p struct{ Name string }) error {
@@ -175,14 +181,17 @@ func (s *completionSource) Discriminator() dispatch.Discriminator {
 	return dispatch.HasFields("task", "token", "payload")
 }
 
-func (s *completionSource) Parse(raw []byte) (dispatch.Parsed, bool) {
+func (s *completionSource) Parse(raw []byte) (dispatch.Parsed, error) {
 	var env struct {
 		Task    string          `json:"task"`
 		Token   string          `json:"token"`
 		Payload json.RawMessage `json:"payload"`
 	}
-	if err := json.Unmarshal(raw, &env); err != nil || env.Token == "" {
-		return dispatch.Parsed{}, false
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return dispatch.Parsed{}, err
+	}
+	if env.Token == "" {
+		return dispatch.Parsed{}, fmt.Errorf("missing token field")
 	}
 	return dispatch.Parsed{
 		Key:     env.Task,
@@ -195,7 +204,7 @@ func (s *completionSource) Parse(raw []byte) (dispatch.Parsed, bool) {
 			}
 			return nil
 		},
-	}, true
+	}, nil
 }
 
 func Example_completion() {
