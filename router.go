@@ -120,7 +120,11 @@ func Register[T any](r *Router, key string, h Handler[T]) {
 			return &unmarshalError{err: err}
 		}
 
-		if v, ok := any(&data).(validatable); ok {
+		if v, ok := any(data).(validatable); ok {
+			if err := v.Validate(); err != nil {
+				return &validationError{err: err}
+			}
+		} else if v, ok := any(&data).(validatable); ok {
 			if err := v.Validate(); err != nil {
 				return &validationError{err: err}
 			}
@@ -435,6 +439,8 @@ func (r *Router) handleNoHandler(ctx context.Context, source Source, sourceName,
 }
 
 // handleUnmarshalError handles JSON unmarshal errors.
+//
+//nolint:dupl // Similar to handleValidationError; intentional pattern
 func (r *Router) handleUnmarshalError(ctx context.Context, source Source, sourceName, key string, err error, complete func(context.Context, error) error) error {
 	var errs []error
 
@@ -466,6 +472,8 @@ func (r *Router) handleUnmarshalError(ctx context.Context, source Source, source
 }
 
 // handleValidationError handles payload validation errors.
+//
+//nolint:dupl // Similar to handleUnmarshalError; intentional pattern
 func (r *Router) handleValidationError(ctx context.Context, source Source, sourceName, key string, err error, complete func(context.Context, error) error) error {
 	var errs []error
 
