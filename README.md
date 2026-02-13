@@ -12,8 +12,9 @@ A flexible message routing framework for event-driven Go applications.
 - **Multi-Source Routing** — Route messages from webhooks, message queues, or custom formats through a single processor
 - **Discriminator Pattern** — Cheap detection before expensive parsing for O(1) hot-path matching
 - **Typed Handlers** — Automatic JSON unmarshaling and validation with generics
+- **Proc/Func Pattern** — Fire-and-forget procedures or request-response functions
+- **Replier Interface** — Built-in support for request-response transports (Step Functions, etc.)
 - **Pluggable Hooks** — Observability without coupling to specific logging or metrics systems
-- **Completion Callbacks** — Built-in support for async acknowledgment patterns
 - **Format Agnostic** — Inspector/View abstraction supports JSON, protobuf, or custom formats
 - **Zero Allocation Matching** — Uses gjson for efficient JSON field lookups
 
@@ -44,11 +45,11 @@ type UserCreatedPayload struct {
     Email  string `json:"email"`
 }
 
-// Define your handler
-type UserCreatedHandler struct{}
+// Define a procedure (fire-and-forget)
+type UserCreatedProc struct{}
 
-func (h *UserCreatedHandler) Handle(ctx context.Context, p UserCreatedPayload) error {
-    log.Printf("User created: %s (%s)", p.UserID, p.Email)
+func (p *UserCreatedProc) Run(ctx context.Context, payload UserCreatedPayload) error {
+    log.Printf("User created: %s (%s)", payload.UserID, payload.Email)
     return nil
 }
 
@@ -61,15 +62,15 @@ func (s *mySource) Discriminator() dispatch.Discriminator {
     return dispatch.HasFields("type", "payload")
 }
 
-func (s *mySource) Parse(raw []byte) (dispatch.Parsed, bool) {
+func (s *mySource) Parse(raw []byte) (dispatch.Message, error) {
     var env struct {
         Type    string          `json:"type"`
         Payload json.RawMessage `json:"payload"`
     }
-    if err := json.Unmarshal(raw, &env); err != nil || env.Type == "" {
-        return dispatch.Parsed{}, false
+    if err := json.Unmarshal(raw, &env); err != nil {
+        return dispatch.Message{}, err
     }
-    return dispatch.Parsed{Key: env.Type, Payload: env.Payload}, true
+    return dispatch.Message{Key: env.Type, Payload: env.Payload}, nil
 }
 
 func main() {
@@ -79,8 +80,8 @@ func main() {
     // Add source
     r.AddSource(&mySource{})
 
-    // Register handler
-    dispatch.Register(r, "user/created", &UserCreatedHandler{})
+    // Register procedure
+    dispatch.RegisterProc(r, "user/created", &UserCreatedProc{})
 
     // Process a message
     msg := []byte(`{"type": "user/created", "payload": {"user_id": "123", "email": "test@example.com"}}`)
@@ -98,7 +99,25 @@ The package separates concerns into three layers:
 |-------|---------------|
 | **Sources** | Parse raw bytes, extract routing key + payload |
 | **Router** | Match keys to handlers, orchestrate dispatch flow |
-| **Handlers** | Pure business logic with typed payloads |
+| **Handlers** | Pure business logic with typed payloads (Proc or Func) |
+
+### Proc vs Func
+
+The package provides two handler patterns:
+
+```go
+// Proc: Fire-and-forget (returns only error)
+type Proc[T any] interface {
+    Run(ctx context.Context, payload T) error
+}
+
+// Func: Request-response (returns result and error)
+type Func[T, R any] interface {
+    Call(ctx context.Context, payload T) (R, error)
+}
+```
+
+Use `Proc` for event handlers where you don't need to send a response. Use `Func` for request-response patterns like Step Functions tasks.
 
 ### Discriminator Pattern
 
@@ -133,6 +152,66 @@ r.AddSource(apiSource)
 // Custom group for protobuf messages
 r.AddGroup(protoInspector, grpcSource, kafkaSource)
 ```
+
+## Handler Registration
+
+```go
+// Register a procedure (fire-and-forget)
+dispatch.RegisterProc(r, "user/created", &UserCreatedProc{})
+
+// Register a function (request-response)
+dispatch.RegisterFunc(r, "lookup-user", &LookupUserFunc{})
+
+// Or use function adapters for simple cases
+dispatch.RegisterProcFunc(r, "ping", func(ctx context.Context, p PingPayload) error {
+    return nil
+})
+
+dispatch.RegisterFuncFunc(r, "echo", func(ctx context.Context, in Input) (*Output, error) {
+    return &Output{Value: in.Value}, nil
+})
+```
+
+## Replier Interface
+
+For transports that require sending responses back (like Step Functions), sources can provide a Replier:
+
+```go
+type Replier interface {
+    Reply(ctx context.Context, result json.RawMessage) error
+    Fail(ctx context.Context, err error) error
+}
+```
+
+Example Step Functions source:
+
+```go
+type sfnReplier struct {
+    sfn   SFNClient
+    token string
+}
+
+func (r *sfnReplier) Reply(ctx context.Context, result json.RawMessage) error {
+    return r.sfn.SendTaskSuccess(ctx, r.token, result)
+}
+
+func (r *sfnReplier) Fail(ctx context.Context, err error) error {
+    return r.sfn.SendTaskFailure(ctx, r.token, err)
+}
+
+func (s *sfnSource) Parse(raw []byte) (dispatch.Message, error) {
+    // ... parse envelope ...
+    return dispatch.Message{
+        Key:     taskType,
+        Payload: payload,
+        Replier: &sfnReplier{sfn: s.sfn, token: token},
+    }, nil
+}
+```
+
+When a Replier is present:
+- On success: router calls `Replier.Reply` with the marshaled result (or `{}` for Procs)
+- On error: router calls `Replier.Fail` with the error
 
 ## Discriminators
 
@@ -198,33 +277,6 @@ type OnParseHook interface {
 
 type OnSuccessHook interface {
     OnSuccess(ctx context.Context, key string, duration time.Duration)
-}
-```
-
-## Completion Callbacks
-
-For transports that require explicit acknowledgment after processing:
-
-```go
-func (s *taskSource) Parse(raw []byte) (dispatch.Parsed, bool) {
-    var env struct {
-        TaskID  string          `json:"task_id"`
-        Type    string          `json:"type"`
-        Payload json.RawMessage `json:"payload"`
-    }
-    if err := json.Unmarshal(raw, &env); err != nil {
-        return dispatch.Parsed{}, false
-    }
-    return dispatch.Parsed{
-        Key:     env.Type,
-        Payload: env.Payload,
-        Complete: func(ctx context.Context, err error) error {
-            if err != nil {
-                return s.taskQueue.ReportFailure(ctx, env.TaskID, err)
-            }
-            return s.taskQueue.ReportSuccess(ctx, env.TaskID)
-        },
-    }, true
 }
 ```
 

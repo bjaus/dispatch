@@ -2,13 +2,13 @@
 //
 // The dispatch package routes messages from multiple sources (EventBridge, SNS, Step Functions,
 // Kinesis, or custom formats) to typed handlers. It handles envelope parsing, payload
-// unmarshaling, validation, and completion semantics — letting you focus on business logic.
+// unmarshaling, validation, and response semantics — letting you focus on business logic.
 //
 // # Quick Start
 //
-// Define a handler for your event type:
+// Define a procedure (no return value) for fire-and-forget patterns:
 //
-//	type UserCreatedHandler struct {
+//	type UserCreatedProc struct {
 //	    onboarding Onboarding
 //	}
 //
@@ -17,8 +17,22 @@
 //	    Email  string `json:"email"`
 //	}
 //
-//	func (h *UserCreatedHandler) Handle(ctx context.Context, p UserCreatedPayload) error {
-//	    return h.onboarding.RegisterUser(ctx, p.UserID, p.Email)
+//	func (p *UserCreatedProc) Run(ctx context.Context, payload UserCreatedPayload) error {
+//	    return p.onboarding.RegisterUser(ctx, payload.UserID, payload.Email)
+//	}
+//
+// Or define a function (returns result) for request-response patterns:
+//
+//	type LookupUserFunc struct {
+//	    client IdentityClient
+//	}
+//
+//	func (f *LookupUserFunc) Call(ctx context.Context, in LookupInput) (*LookupResult, error) {
+//	    user, err := f.client.GetUser(ctx, in.UserID)
+//	    if err != nil {
+//	        return nil, err
+//	    }
+//	    return &LookupResult{Email: user.Email}, nil
 //	}
 //
 // Create a router, add sources, and register handlers:
@@ -27,7 +41,8 @@
 //
 //	r.AddSource(myEventBridgeSource)
 //
-//	dispatch.Register(r, "user/created", &UserCreatedHandler{onboarding})
+//	dispatch.RegisterProc(r, "my.service:user/created", &UserCreatedProc{onboarding})
+//	dispatch.RegisterFunc(r, "my.service:lookup-user", &LookupUserFunc{client})
 //
 //	// Process messages
 //	err := r.Process(ctx, rawMessageBytes)
@@ -38,13 +53,24 @@
 //
 //   - Sources: Parse raw bytes and extract routing keys + payloads
 //   - Router: Matches keys to handlers, orchestrates the dispatch flow
-//   - Handlers: Pure business logic with typed payloads
+//   - Handlers: Pure business logic with typed payloads (Proc or Func)
 //
 // This separation allows:
 //   - Multiple message formats on a single queue
 //   - Transport-agnostic handler code
 //   - Consistent observability via hooks
 //   - Easy testing with mock sources
+//
+// # Proc vs Func
+//
+// The package provides two handler patterns:
+//
+//   - Proc[T]: For fire-and-forget operations (Run returns only error)
+//   - Func[T, R]: For request-response operations (Call returns result and error)
+//
+// Sources can set Message.Replier to enable response handling. When a Replier is
+// present, the router automatically calls Replier.Reply on success (with the
+// marshaled result for Func, or {} for Proc) or Replier.Fail on error.
 //
 // # Discriminator Pattern
 //
@@ -98,17 +124,18 @@
 //	type Source interface {
 //	    Name() string
 //	    Discriminator() Discriminator
-//	    Parse(raw []byte) (Parsed, error)
+//	    Parse(raw []byte) (Message, error)
 //	}
 //
-// Sources are matched using their Discriminator, then parsed in registration order.
-// The first source whose discriminator matches and Parse succeeds handles the message.
+// Sources are evaluated in registration order using their Discriminator. Once a matching
+// source is found, the router calls its Parse method. If Parse returns an error, processing
+// stops and the error is returned; the router does not fall back to other sources.
 //
-// The Parsed struct contains:
+// The Message struct contains:
 //   - Key: routing key to match against registered handlers
 //   - Version: optional schema version for version-aware routing
 //   - Payload: raw JSON to unmarshal into the handler's type
-//   - Complete: optional callback for completion semantics (e.g., Step Functions)
+//   - Replier: optional interface for request-response patterns
 //
 // Example source implementation:
 //
@@ -120,18 +147,18 @@
 //	    return dispatch.HasFields("type", "payload")
 //	}
 //
-//	func (s *mySource) Parse(raw []byte) (dispatch.Parsed, error) {
+//	func (s *mySource) Parse(raw []byte) (dispatch.Message, error) {
 //	    var env struct {
 //	        Type    string          `json:"type"`
 //	        Payload json.RawMessage `json:"payload"`
 //	    }
 //	    if err := json.Unmarshal(raw, &env); err != nil {
-//	        return dispatch.Parsed{}, err
+//	        return dispatch.Message{}, err
 //	    }
 //	    if env.Type == "" {
-//	        return dispatch.Parsed{}, errors.New("missing type field")
+//	        return dispatch.Message{}, errors.New("missing type field")
 //	    }
-//	    return dispatch.Parsed{
+//	    return dispatch.Message{
 //	        Key:     env.Type,
 //	        Payload: env.Payload,
 //	    }, nil
@@ -143,22 +170,60 @@
 //
 // # Handlers
 //
-// Handlers implement the Handler interface with a typed payload:
+// Procedures implement the Proc interface (fire-and-forget):
 //
-//	type Handler[T any] interface {
-//	    Handle(ctx context.Context, payload T) error
+//	type Proc[T any] interface {
+//	    Run(ctx context.Context, payload T) error
+//	}
+//
+// Functions implement the Func interface (request-response):
+//
+//	type Func[T, R any] interface {
+//	    Call(ctx context.Context, payload T) (R, error)
 //	}
 //
 // The router automatically:
 //   - Unmarshals the JSON payload to the handler's type
-//   - Validates the payload if it implements validation.Validatable
+//   - Validates the payload if it implements Validate() error
 //   - Calls the handler with the typed payload
+//   - Sends the response via Replier if present
 //
-// Use HandlerFunc for simple cases without a struct:
+// Use ProcFunc/FuncFunc for simple cases without a struct:
 //
-//	dispatch.RegisterFunc(r, "ping", func(ctx context.Context, p PingPayload) error {
+//	dispatch.RegisterProcFunc(r, "ping", func(ctx context.Context, p PingPayload) error {
 //	    return nil
 //	})
+//
+//	dispatch.RegisterFuncFunc(r, "lookup", func(ctx context.Context, in Input) (*Result, error) {
+//	    return &Result{...}, nil
+//	})
+//
+// # Replier
+//
+// Sources can provide a Replier in Message for transport-specific response handling.
+// For example, Step Functions requires SendTaskSuccess or SendTaskFailure after processing:
+//
+//	type sfnReplier struct {
+//	    sfn   SFNClient
+//	    token string
+//	}
+//
+//	func (r *sfnReplier) Reply(ctx context.Context, result json.RawMessage) error {
+//	    return r.sfn.SendTaskSuccess(ctx, r.token, result)
+//	}
+//
+//	func (r *sfnReplier) Fail(ctx context.Context, err error) error {
+//	    return r.sfn.SendTaskFailure(ctx, r.token, err)
+//	}
+//
+//	func (s *sfnSource) Parse(raw []byte) (dispatch.Message, error) {
+//	    // ... parse envelope ...
+//	    return dispatch.Message{
+//	        Key:     taskType,
+//	        Payload: payload,
+//	        Replier: &sfnReplier{sfn: s.sfn, token: token},
+//	    }, nil
+//	}
 //
 // # Hooks
 //
@@ -183,7 +248,6 @@
 //   - WithOnSuccess: Called after handler succeeds
 //   - WithOnFailure: Called after handler fails
 //   - WithOnNoSource: Called when no source matches
-//   - WithOnParseError: Called when source's Parse returns an error
 //   - WithOnNoHandler: Called when no handler is registered
 //   - WithOnUnmarshalError: Called on JSON unmarshal errors
 //   - WithOnValidationError: Called on validation errors
@@ -210,29 +274,9 @@
 // For error-returning hooks, if either global or source returns an error, that
 // error is returned. This allows sources to override global skip/fail policies.
 //
-// # Completion Callbacks
-//
-// Sources can provide a Complete callback in Parsed for transport-specific
-// completion semantics. For example, Step Functions requires SendTaskSuccess
-// or SendTaskFailure after processing:
-//
-//	func (s *sfnSource) Parse(raw []byte) (dispatch.Parsed, bool) {
-//	    // ... parse envelope ...
-//	    return dispatch.Parsed{
-//	        Key:     taskType,
-//	        Payload: payload,
-//	        Complete: func(ctx context.Context, err error) error {
-//	            if err != nil {
-//	                return s.sfn.SendTaskFailure(...)
-//	            }
-//	            return s.sfn.SendTaskSuccess(...)
-//	        },
-//	    }, true
-//	}
-//
 // # Validation
 //
-// Payloads that implement validation.Validatable are automatically validated
+// Payloads that implement Validate() error are automatically validated
 // after unmarshaling:
 //
 //	type UserPayload struct {
@@ -269,5 +313,5 @@
 // # Thread Safety
 //
 // Router is safe for concurrent use after configuration is complete. Do not call
-// AddSource, AddGroup, or Register after calling Process.
+// AddSource, AddGroup, or RegisterProc/RegisterFunc after calling Process.
 package dispatch

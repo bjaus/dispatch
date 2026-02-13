@@ -16,8 +16,8 @@ type validatable interface {
 }
 
 // invoker wraps a typed handler so we can store handlers of different types
-// in a single map.
-type invoker func(ctx context.Context, payload json.RawMessage) error
+// in a single map. Returns the result (nil for Procs) and any error.
+type invoker func(ctx context.Context, payload json.RawMessage) (json.RawMessage, error)
 
 // Router dispatches messages to registered handlers based on routing keys.
 //
@@ -36,8 +36,13 @@ type Router struct {
 	handlers         map[string]invoker
 	hooks            hooks
 
-	// Adaptive ordering: try last successful source first
-	lastMatch atomic.Value // stores string
+	lastMatch atomic.Value // stores sourceRef
+}
+
+// sourceRef identifies a source by its position in the router.
+type sourceRef struct {
+	groupIdx  int // -1 for default sources
+	sourceIdx int
 }
 
 // group holds sources that share an inspector.
@@ -103,50 +108,98 @@ func (r *Router) AddGroup(inspector Inspector, sources ...Source) {
 	r.groups = append(r.groups, group{inspector: inspector, sources: sources})
 }
 
-// Register adds a handler for a routing key. The key must match the Key field
-// returned by a source's Parse method.
+// RegisterProc adds a procedure (no result) for a routing key. The key must
+// match the Key field returned by a source's Parse method.
 //
 // This is a package-level function (not a method) due to Go generics limitations:
 // methods cannot have type parameters independent of the receiver.
 //
 // Example:
 //
-//	dispatch.Register(r, "user/created", &UserCreatedHandler{db: db})
-//	dispatch.Register(r, "user/deleted", &UserDeletedHandler{db: db})
-func Register[T any](r *Router, key string, h Handler[T]) {
-	r.handlers[key] = func(ctx context.Context, payload json.RawMessage) error {
-		var data T
-		if err := json.Unmarshal(payload, &data); err != nil {
-			return &unmarshalError{err: err}
+//	dispatch.RegisterProc(r, "user/created", &UserCreatedProc{db: db})
+//	dispatch.RegisterProc(r, "user/deleted", &UserDeletedProc{db: db})
+func RegisterProc[T any](r *Router, key string, p Proc[T]) {
+	r.handlers[key] = func(ctx context.Context, payload json.RawMessage) (json.RawMessage, error) {
+		data, err := unmarshalAndValidate[T](payload)
+		if err != nil {
+			return nil, err
 		}
-
-		if v, ok := any(data).(validatable); ok {
-			if err := v.Validate(); err != nil {
-				return &validationError{err: err}
-			}
-		} else if v, ok := any(&data).(validatable); ok {
-			if err := v.Validate(); err != nil {
-				return &validationError{err: err}
-			}
+		if err := p.Run(ctx, data); err != nil {
+			return nil, err
 		}
-
-		return h.Handle(ctx, data)
+		// Procs return empty JSON object for Replier.Reply
+		return []byte("{}"), nil
 	}
 }
 
-// RegisterFunc is a convenience function for registering a handler function.
+// RegisterFunc adds a function (returns result) for a routing key. The key must
+// match the Key field returned by a source's Parse method.
 //
 // Example:
 //
-//	dispatch.RegisterFunc(r, "ping", func(ctx context.Context, p PingPayload) error {
+//	dispatch.RegisterFunc(r, "lookup-user", &LookupUserFunc{client: client})
+func RegisterFunc[T, R any](r *Router, key string, f Func[T, R]) {
+	r.handlers[key] = func(ctx context.Context, payload json.RawMessage) (json.RawMessage, error) {
+		data, err := unmarshalAndValidate[T](payload)
+		if err != nil {
+			return nil, err
+		}
+		result, err := f.Call(ctx, data)
+		if err != nil {
+			return nil, err
+		}
+		resultJSON, err := json.Marshal(result)
+		if err != nil {
+			return nil, fmt.Errorf("marshal result: %w", err)
+		}
+		return resultJSON, nil
+	}
+}
+
+// unmarshalAndValidate unmarshals JSON and validates if the type implements validatable.
+func unmarshalAndValidate[T any](payload json.RawMessage) (T, error) {
+	var data T
+	if err := json.Unmarshal(payload, &data); err != nil {
+		return data, &unmarshalError{err: err}
+	}
+
+	if v, ok := any(data).(validatable); ok {
+		if err := v.Validate(); err != nil {
+			return data, &validationError{err: err}
+		}
+	} else if v, ok := any(&data).(validatable); ok {
+		if err := v.Validate(); err != nil {
+			return data, &validationError{err: err}
+		}
+	}
+
+	return data, nil
+}
+
+// RegisterProcFunc is a convenience function for registering a procedure function.
+//
+// Example:
+//
+//	dispatch.RegisterProcFunc(r, "user/created", func(ctx context.Context, p Payload) error {
 //	    return nil
 //	})
-func RegisterFunc[T any](r *Router, key string, fn func(ctx context.Context, payload T) error) {
-	Register(r, key, HandlerFunc[T](fn))
+func RegisterProcFunc[T any](r *Router, key string, fn func(ctx context.Context, payload T) error) {
+	RegisterProc(r, key, ProcFunc[T](fn))
+}
+
+// RegisterFuncFunc is a convenience function for registering a function function.
+//
+// Example:
+//
+//	dispatch.RegisterFuncFunc(r, "lookup-user", func(ctx context.Context, in Input) (*Result, error) {
+//	    return &Result{...}, nil
+//	})
+func RegisterFuncFunc[T, R any](r *Router, key string, fn func(ctx context.Context, payload T) (R, error)) {
+	RegisterFunc(r, key, FuncFunc[T, R](fn))
 }
 
 // Process parses the raw message, routes to the appropriate handler, and
-// executes completion callbacks.
+// sends responses via the Replier if present.
 //
 // The processing flow:
 //  1. Use discriminators to find a matching source
@@ -155,7 +208,7 @@ func RegisterFunc[T any](r *Router, key string, fn func(ctx context.Context, pay
 //  4. Unmarshal the payload to the handler's type
 //  5. Validate the payload if it implements Validatable
 //  6. Call the handler
-//  7. Call the source's Complete callback if provided
+//  7. Send response via Replier if present (success or failure)
 //
 // Hooks are called at appropriate points throughout this flow.
 //
@@ -178,7 +231,7 @@ func (r *Router) Process(ctx context.Context, raw []byte) error {
 	}
 
 	// Parse with matched source
-	parsed, err := source.Parse(raw)
+	msg, err := source.Parse(raw)
 	if err != nil {
 		return r.handleParseError(ctx, source, err)
 	}
@@ -186,42 +239,45 @@ func (r *Router) Process(ctx context.Context, raw []byte) error {
 	sourceName := source.Name()
 
 	// OnParse: global, then source
-	ctx = r.callOnParse(ctx, source, sourceName, parsed.Key)
+	ctx = r.callOnParse(ctx, source, sourceName, msg.Key)
 
 	// Look up handler
-	handler, found := r.handlers[parsed.Key]
+	handler, found := r.handlers[msg.Key]
 	if !found {
-		return r.handleNoHandler(ctx, source, sourceName, parsed.Key)
+		return r.handleNoHandler(ctx, source, sourceName, msg.Key, msg.Replier)
 	}
 
 	// OnDispatch: global, then source
-	r.callOnDispatch(ctx, source, sourceName, parsed.Key)
+	r.callOnDispatch(ctx, source, sourceName, msg.Key)
 
 	// Execute handler
 	start := time.Now()
-	err = handler(ctx, parsed.Payload)
+	result, err := handler(ctx, msg.Payload)
 	duration := time.Since(start)
 
 	// Handle unmarshal and validation errors specially
 	var uerr *unmarshalError
 	if errors.As(err, &uerr) {
-		return r.handleUnmarshalError(ctx, source, sourceName, parsed.Key, uerr.err, parsed.Complete)
+		return r.handleUnmarshalError(ctx, source, sourceName, msg.Key, uerr.err, msg.Replier)
 	}
 	var verr *validationError
 	if errors.As(err, &verr) {
-		return r.handleValidationError(ctx, source, sourceName, parsed.Key, verr.err, parsed.Complete)
+		return r.handleValidationError(ctx, source, sourceName, msg.Key, verr.err, msg.Replier)
 	}
 
 	// OnSuccess/OnFailure: global, then source
 	if err != nil {
-		r.callOnFailure(ctx, source, sourceName, parsed.Key, err, duration)
+		r.callOnFailure(ctx, source, sourceName, msg.Key, err, duration)
 	} else {
-		r.callOnSuccess(ctx, source, sourceName, parsed.Key, duration)
+		r.callOnSuccess(ctx, source, sourceName, msg.Key, duration)
 	}
 
-	// Complete callback (e.g., Step Functions)
-	if parsed.Complete != nil {
-		return parsed.Complete(ctx, err)
+	// Send response via Replier if present
+	if msg.Replier != nil {
+		if err != nil {
+			return msg.Replier.Fail(ctx, err)
+		}
+		return msg.Replier.Reply(ctx, result)
 	}
 
 	return err
@@ -263,77 +319,76 @@ func (c *viewCache) get(insp Inspector) (View, bool) {
 }
 
 // match finds a source whose discriminator matches the raw message.
-// Uses adaptive ordering to try the last successful source first.
 func (r *Router) match(raw []byte) Source {
 	cache := newViewCache(raw)
 
-	// Try last successful source first (fast path)
 	if v := r.lastMatch.Load(); v != nil {
-		if lastMatch, ok := v.(string); ok && lastMatch != "" {
-			if src := r.trySource(cache, lastMatch); src != nil {
+		if ref, ok := v.(sourceRef); ok {
+			if src := r.trySource(cache, ref); src != nil {
 				return src
 			}
 		}
 	}
 
-	// Full search through all groups
-	src := r.matchAll(cache)
-	if src != nil {
-		r.lastMatch.Store(src.Name())
-	}
-	return src
+	return r.matchAll(cache)
 }
 
-// trySource attempts to match a specific source by name.
-func (r *Router) trySource(cache *viewCache, name string) Source {
-	// Check default sources
-	if len(r.defaultSources) > 0 {
-		if view, ok := cache.get(r.defaultInspector); ok {
-			for _, src := range r.defaultSources {
-				if src.Name() == name && src.Discriminator().Match(view) {
-					return src
-				}
-			}
+// trySource attempts to match the source at the given position.
+func (r *Router) trySource(cache *viewCache, ref sourceRef) Source {
+	if ref.groupIdx == -1 {
+		if ref.sourceIdx >= len(r.defaultSources) {
+			return nil
 		}
-	}
-
-	// Check custom groups
-	for _, g := range r.groups {
-		view, ok := cache.get(g.inspector)
+		view, ok := cache.get(r.defaultInspector)
 		if !ok {
-			continue
+			return nil
 		}
-		for _, src := range g.sources {
-			if src.Name() == name && src.Discriminator().Match(view) {
-				return src
-			}
+		src := r.defaultSources[ref.sourceIdx]
+		if src.Discriminator().Match(view) {
+			return src
 		}
+		return nil
 	}
 
+	if ref.groupIdx >= len(r.groups) {
+		return nil
+	}
+	g := r.groups[ref.groupIdx]
+	if ref.sourceIdx >= len(g.sources) {
+		return nil
+	}
+	view, ok := cache.get(g.inspector)
+	if !ok {
+		return nil
+	}
+	src := g.sources[ref.sourceIdx]
+	if src.Discriminator().Match(view) {
+		return src
+	}
 	return nil
 }
 
 // matchAll searches all groups for a matching source.
 func (r *Router) matchAll(cache *viewCache) Source {
-	// Try default group first
 	if len(r.defaultSources) > 0 {
 		if view, ok := cache.get(r.defaultInspector); ok {
-			for _, src := range r.defaultSources {
+			for i, src := range r.defaultSources {
 				if src.Discriminator().Match(view) {
+					r.lastMatch.Store(sourceRef{groupIdx: -1, sourceIdx: i})
 					return src
 				}
 			}
 		}
 	}
 
-	// Try custom groups in order
-	for _, g := range r.groups {
+	for gi, g := range r.groups {
 		view, ok := cache.get(g.inspector)
 		if !ok {
 			continue
 		}
-		for _, src := range g.sources {
+		for si, src := range g.sources {
 			if src.Discriminator().Match(view) {
+				r.lastMatch.Store(sourceRef{groupIdx: gi, sourceIdx: si})
 				return src
 			}
 		}
@@ -411,7 +466,7 @@ func (r *Router) handleParseError(ctx context.Context, source Source, parseErr e
 }
 
 // handleNoHandler handles the case when no handler is registered.
-func (r *Router) handleNoHandler(ctx context.Context, source Source, sourceName, key string) error {
+func (r *Router) handleNoHandler(ctx context.Context, source Source, sourceName, key string, replier Replier) error {
 	var errs []error
 
 	for _, fn := range r.hooks.onNoHandler {
@@ -426,22 +481,23 @@ func (r *Router) handleNoHandler(ctx context.Context, source Source, sourceName,
 		}
 	}
 
-	if len(errs) > 0 {
-		return errs[0]
+	var resultErr error
+	switch {
+	case len(errs) > 0:
+		resultErr = errs[0]
+	case len(r.hooks.onNoHandler) == 0:
+		resultErr = fmt.Errorf("no handler for key: %s", key)
 	}
 
-	// Default behavior if no hooks set
-	if len(r.hooks.onNoHandler) == 0 {
-		return fmt.Errorf("no handler for key: %s", key)
+	if resultErr != nil && replier != nil {
+		return replier.Fail(ctx, resultErr)
 	}
 
-	return nil
+	return resultErr
 }
 
 // handleUnmarshalError handles JSON unmarshal errors.
-//
-//nolint:dupl // Similar to handleValidationError; intentional pattern
-func (r *Router) handleUnmarshalError(ctx context.Context, source Source, sourceName, key string, err error, complete func(context.Context, error) error) error {
+func (r *Router) handleUnmarshalError(ctx context.Context, source Source, sourceName, key string, err error, replier Replier) error {
 	var errs []error
 
 	for _, fn := range r.hooks.onUnmarshalError {
@@ -464,17 +520,15 @@ func (r *Router) handleUnmarshalError(ctx context.Context, source Source, source
 		resultErr = fmt.Errorf("unmarshal payload: %w", err)
 	}
 
-	if complete != nil {
-		return complete(ctx, resultErr)
+	if resultErr != nil && replier != nil {
+		return replier.Fail(ctx, resultErr)
 	}
 
 	return resultErr
 }
 
 // handleValidationError handles payload validation errors.
-//
-//nolint:dupl // Similar to handleUnmarshalError; intentional pattern
-func (r *Router) handleValidationError(ctx context.Context, source Source, sourceName, key string, err error, complete func(context.Context, error) error) error {
+func (r *Router) handleValidationError(ctx context.Context, source Source, sourceName, key string, err error, replier Replier) error {
 	var errs []error
 
 	for _, fn := range r.hooks.onValidationError {
@@ -497,8 +551,8 @@ func (r *Router) handleValidationError(ctx context.Context, source Source, sourc
 		resultErr = fmt.Errorf("validate payload: %w", err)
 	}
 
-	if complete != nil {
-		return complete(ctx, resultErr)
+	if resultErr != nil && replier != nil {
+		return replier.Fail(ctx, resultErr)
 	}
 
 	return resultErr
